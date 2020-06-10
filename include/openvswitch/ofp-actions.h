@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017, 2019-2020 Nicira, Inc.
+ * Copyright (c) 2012, 2013, 2014, 2015, 2016, 2017, 2019 Nicira, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -94,7 +94,6 @@ struct vl_mff_map;
     OFPACT(PUSH_MPLS,       ofpact_push_mpls,   ofpact, "push_mpls")    \
     OFPACT(POP_MPLS,        ofpact_pop_mpls,    ofpact, "pop_mpls")     \
     OFPACT(DEC_NSH_TTL,     ofpact_null,        ofpact, "dec_nsh_ttl")  \
-    OFPACT(DELETE_FIELD,    ofpact_delete_field, ofpact, "delete_field") \
                                                                         \
     /* Generic encap & decap */                                         \
     OFPACT(ENCAP,           ofpact_encap,       props, "encap")         \
@@ -126,7 +125,7 @@ struct vl_mff_map;
     OFPACT(CLONE,           ofpact_nest,        actions, "clone")       \
     OFPACT(CHECK_PKT_LARGER, ofpact_check_pkt_larger, ofpact,           \
            "check_pkt_larger")                                          \
-                                                                        \
+    OFPACT(AGGRS,           ofpact_null, 	    ofpact, "aggrs")                                                                    \
     /* Debugging actions.                                               \
      *                                                                  \
      * These are intentionally undocumented, subject to change, and     \
@@ -140,6 +139,7 @@ struct vl_mff_map;
     OFPACT(WRITE_ACTIONS,   ofpact_nest,        actions, "write_actions") \
     OFPACT(WRITE_METADATA,  ofpact_metadata,    ofpact, "write_metadata") \
     OFPACT(GOTO_TABLE,      ofpact_goto_table,  ofpact, "goto_table")
+
 
 /* enum ofpact_type, with a member OFPACT_<ENUM> for each action. */
 enum OVS_PACKED_ENUM ofpact_type {
@@ -574,16 +574,6 @@ struct ofpact_pop_mpls {
     OFPACT_PADDED_MEMBERS(
         struct ofpact ofpact;
         ovs_be16 ethertype;
-    );
-};
-
-/* OFPACT_DELETE_FIELD.
- *
- * Used for NXAST_DELETE_FIELD. */
-struct ofpact_delete_field {
-    OFPACT_PADDED_MEMBERS(
-        struct ofpact ofpact;
-        const struct mf_field *field;
     );
 };
 
@@ -1125,7 +1115,12 @@ struct ofpact_decap {
         ovs_be32 new_pkt_type;
     );
 };
+struct ofpact_aggrs{
+    OFPACT_PADDED_MEMBERS(
+	    struct ofpact ofpact;
+    );
 
+};
 /* Converting OpenFlow to ofpacts. */
 enum ofperr ofpacts_pull_openflow_actions(struct ofpbuf *openflow,
                                           unsigned int actions_len,
