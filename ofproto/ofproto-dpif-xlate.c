@@ -4085,6 +4085,8 @@ compose_aggrs_action(struct xlate_ctx *ctx)//const struct dp_packet *pkt)//struc
     }
     if(index1 == 5 && ctx->xin->packet) // noncredo serva sto controllo --> && ctx->xin->packet
     {
+        //lets gooo
+        VLOG_ERR("print index1: %d", index1);
         index1 = 0;
         //create new packet structure
         struct dp_packet *packetAggr;
@@ -4112,8 +4114,6 @@ compose_aggrs_action(struct xlate_ctx *ctx)//const struct dp_packet *pkt)//struc
 
         struct eth_header *eth_hdrforAggr = dp_packet_eth(packetAggr);
         eth_hdrforAggr->eth_src = fake_mac;
-        //prova
-        //eth_hdrforAggr->eth_dst = broadcast_mac;
 
         VLOG_ERR("packetaggr: %s with l4 size %ld ", ofp_dp_packet_to_string(packetAggr), dp_packet_l4_size(packetAggr));//, (int) dp_packet_size(packetAggr));
         //VLOG_ERR("string packet payload: %s", (char *) dp_packet_get_udp_payload(packetTemp));
@@ -4171,7 +4171,7 @@ compose_deaggr(struct xlate_ctx *ctx)
                     const struct ofport_dpif *portDeaggr;
                     ofp_port_t out_port = 1;
                     portDeaggr = ofp_port_to_ofport(ofproto, out_port);
-                    ofproto_dpif_send_packet(portDeaggr, false, checkrecvdAggr[j].packet);
+                    ofproto_dpif_send_packet(portDeaggr, false, checkrecvdAggr[j].packet);   
                 }
 
                 if(j==4)
