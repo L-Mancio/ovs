@@ -5313,24 +5313,8 @@ compose_deaggr(struct xlate_ctx *ctx, struct ofpact_deaggr *deaggr)
             for(int j=0; j<PACKET_BUFF_ELEMENTS; j++)
             {
 
-                HMAP_FOR_EACH(port, hmap_node, &ofproto->up.ports)
-                {
-                    //this works!
-                    //port->ofp_port = OFPP_NORMAL;
-                    //VLOG_ERR("port available: %"PRIu16, ofp_to_u16(port->ofp_port));
-                    VLOG_ERR("netdev available: %s", netdev_get_name(port->netdev));
-                    const struct ofport_dpif *portDeaggr;
-                    //ofp_port_t out_port = OFPP_NORMAL;//OFPP_CONTROLLER; //1
-                    portDeaggr = ofp_port_to_ofport(ofproto, port->ofp_port);
-
-                    ofproto_dpif_send_packet(portDeaggr, false, checkrecvdAggr[j].packet);
-                }
-                */
-
-
-
                 //VLOG_ERR("ofproto datapath name %s", ofproto->up.name );
-                /*
+
                 if(j<4)
                 {
                     VLOG_ERR(" sending to  h2 ");
@@ -5351,7 +5335,7 @@ compose_deaggr(struct xlate_ctx *ctx, struct ofpact_deaggr *deaggr)
                     VLOG_ERR("Invio pacchetto singolo estratto");
                     ofproto_dpif_send_packet(portDeaggr, false, checkrecvdAggr[j].packet); //portDeaggr
                 }
-                */
+
 
             }
         }
