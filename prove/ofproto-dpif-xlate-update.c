@@ -5163,9 +5163,11 @@ xlate_output_action(struct xlate_ctx *ctx, ofp_port_t port,
         ctx->nf_output_iface = NF_OUT_MULTI;
     }
 }
-#define UDP_MAX_PAYLOAD_SIZE 65507
-#define PACKET_BUFF_ELEMENTS 5
-static int index1;
+
+
+#define UDP_MAX_PAYLOAD_SIZE 65507 //never really used
+#define PACKET_BUFF_ELEMENTS 5 //modify according to how many pkts we want to aggregate
+static int index1; //counter
 
 /*
     my packet structure which keeps track of the actual packet size for optimal payload printing
@@ -5183,6 +5185,7 @@ struct my_captured_packet
 
 static struct my_captured_packet dp_packet_buff1[PACKET_BUFF_ELEMENTS]; //used to be array of pointers but deaggregation doesn't work
 //static struct xlate_ctx *ctx_buffer;
+
 /*
     clean heap buffer created since we cannot use free()
 */
@@ -5193,91 +5196,58 @@ clear_packetBuff(struct my_captured_packet buff_tobe_cleaned[])
 }
 
 static void
-compose_aggrs_action(struct xlate_ctx *ctx)//const struct dp_packet *pkt)//struct xlate_ctx *ctx)//, struct ofpact_aggrs *aggrs)
+compose_aggrs_action(struct xlate_ctx *ctx)
 {
-
-    //struct flow_wildcards *wc = ctx->wc;
-    //contains flow to which Openflow actions apply
-    //static const struct flow *flowforAggr;
     struct eth_addr fake_mac = ETH_ADDR_C(12,34,56,78,9a,bc);
-    //struct eth_addr broadcast_mac = ETH_ADDR_C(ff,ff,ff,ff,ff,ff);
-    //VLOG_ERR("index1: %d", index1);
 
-    if(index1 < 5 && ctx->xin->packet)// &dp_packet_buff1[9] == NULL || &dp_packet_buff1[9] == 0 || index1 < 5)
+    if(index1 < 5 && ctx->xin->packet)
     {
-        //xlate_output_action(ctx, OFPP_NORMAL,0, false, false, false, false);
-        //clona il pacchetto in arrivo
-        //ctx_buffer[index1] = *ctx;
+
+        //clone incoming pkt
         struct dp_packet *packet_to_store = dp_packet_clone(ctx->xin->packet);
-        //struct xlate_ctx *myctx = ctx;
-        //VLOG_ERR("size of struct flow: %ld", sizeof(struct flow));
-        //build my_captured_packet array using dp_packet (not the pointer) and the payload size
+
+        //build my_captured_packet array using dp_packet pointer and paylaod size
         dp_packet_buff1[index1].packet = packet_to_store;
         dp_packet_buff1[index1].sizeofpayload = dp_packet_l4_size(ctx->xin->packet) - UDP_HEADER_LEN;
-        //dp_packet_buff1[index1].flow = &ctx->xin->flow;
-        //dp_packet_buff1[index1].check = 1;
+
         int s = dp_packet_l4_size(ctx->xin->packet) - UDP_HEADER_LEN;
         //print payload taking into account its size otherwise weird overlap occurs
-        VLOG_ERR("invio pacchetto da h1: %.*s",s, (char *) dp_packet_get_udp_payload(dp_packet_buff1[index1].packet));
+        VLOG_ERR("pkt payload: %.*s",s, (char *) dp_packet_get_udp_payload(dp_packet_buff1[index1].packet));
         index1++;
-        //VLOG_ERR("porta di uscita %d",  flow->actset_output);
-        //VLOG_ERR("ofp_port %d", (int) ctx->xin->flow.in_port.ofp_port);
+
     }
     if(index1 == 5 && ctx->xin->packet) // noncredo serva sto controllo --> && ctx->xin->packet
     {
-        //lets gooo
-        //VLOG_ERR("print index1: %d", index1);
+
         index1 = 0;
+
         //create new packet structure
         struct dp_packet *packetAggr;
-        packetAggr = dp_packet_new(sizeof dp_packet_buff1 + 100); //65535
-        //struct dp_packet *packetTemp;
-        //packetTemp = dp_packet_new(65535); //65535
+        packetAggr = dp_packet_new(sizeof dp_packet_buff1 + 100); //size doesn't really matter here..i think
 
-        //openflow type port
-        //holding structure
+        //holding structure for ofp_port
         const struct ofproto_dpif *ofproto = ctx->xin->ofproto;
         const struct ofport_dpif *portAggr;
-        ofp_port_t out_port = 2;
+        ofp_port_t out_port = 2; //will be changed to parameter of aggr action
         portAggr = ofp_port_to_ofport(ofproto, out_port);
 
 
 
         //create flow structure to copy flow of one of buffered packets
         struct flow flow;
-        //extract a flow from a buffed pkt
+        //extract a flow from a buff'd pkt
         flow_extract(dp_packet_buff1[0].packet, &flow);
-        //use the flow to build a new packet the one below is right one
-        //flow_compose(packetAggr, &flow, (void *) dp_packet_buff1, sizeof dp_packet_buff1);
-        flow_compose(packetAggr, &flow, (void *) ctx_buffer, sizeof ctx_buffer);
+        //use the flow to build a new packet
+        flow_compose(packetAggr, &flow, (void *) dp_packet_buff1, sizeof dp_packet_buff1);
+        //flow_compose(packetAggr, &flow, (void *) ctx_buffer, sizeof ctx_buffer);
 
 
-
+        //add fake src MAC to distinguish packetAggr from regular packets
         struct eth_header *eth_hdrforAggr = dp_packet_eth(packetAggr);
         eth_hdrforAggr->eth_src = fake_mac;
 
-        //VLOG_ERR("packetaggr: %s with l4 size %ld ", ofp_dp_packet_to_string(packetAggr), dp_packet_l4_size(packetAggr));//, (int) dp_packet_size(packetAggr));
-        //VLOG_ERR("string packet payload: %s", (char *) dp_packet_get_udp_payload(packetTemp));
 
-
-        //struct my_captured_packet *checkrecvdAggr = (struct my_captured_packet *) dp_packet_get_udp_payload(packetAggr);
-        //VLOG_ERR("Whats Happening %.*s", checkrecvdAggr[3].sizeofpayload, (char *) dp_packet_get_udp_payload(checkrecvdAggr[3].this_ctx->xin->packet));
-        //struct xlate_ctx *myctx1 = (struct xlate_ctx *)checkrecvdAggr[3].this_ctx;
-        //LOG_ERR("Whats Happening %.*s", checkrecvdAggr[3].sizeofpayload, (char *) dp_packet_get_udp_payload(myctx1->xin->packet));
-        //VLOG_ERR("structure of extracted packet 3: %s", ofp_dp_packet_to_string(myctx1->xin->packet));
-        //print dp_packet payloads extracted
-        /*
-        for(int j=0; j<PACKET_BUFF_ELEMENTS; j++)
-        {
-            VLOG_ERR("payload #%d: %.*s with size of packet %d", j, recvdpackets[j].sizeofpayload, (char *) dp_packet_get_udp_payload(&recvdpackets[j].packet),
-                        (int) dp_packet_size(&recvdpackets[j].packet) );
-
-        }
-        */
-
-        // useful: struct pkt_metadata,lib/sflow_api.h,ofp_port_t actset_output; //odp_port_to_ofport
-        //xlate_send_packet(portAggr, false, packetAggr);
-        VLOG_ERR("Invio packetAggr..");
+        VLOG_ERR("Sending packetAggr..");
         ofproto_dpif_send_packet(portAggr, false, packetAggr); // works with &dp_packet_buff1[0].packet //packetAggr
         clear_packetBuff(dp_packet_buff1);
 
@@ -5296,31 +5266,33 @@ compose_deaggr(struct xlate_ctx *ctx, struct ofpact_deaggr *deaggr)
     //VLOG_ERR("The Ethernet address is "ETH_ADDR_FMT"\n", ETH_ADDR_ARGS(eth_preDeaggr->eth_src));
     VLOG_ERR("entro in deaggr with uint16_t port = %"PRIu16, deaggr->port);
     VLOG_ERR("entro in deaggr with ofp_port_t port = %ld", (size_t) u16_to_ofp(deaggr->port));
+    //check if packet is valid
     if(ctx->xin->packet)
     {
 
         struct eth_header *eth_preDeaggr = dp_packet_eth(ctx->xin->packet);
-        //VLOG_ERR("structure of pkt received before if: %s ", ofp_dp_packet_to_string(ctx->xin->packet));
 
+        //check if packet is an aggregated packet based on src MAC
         if(eth_addr_equals(eth_preDeaggr->eth_src, fake_mac))
         {
+            //clone packetAggr
             struct dp_packet *packet_to_store_forDeaggr = dp_packet_clone(ctx->xin->packet);
 
-            //VLOG_ERR("structure of pkt received by deaggr: %s ", ofp_dp_packet_to_string(packet_to_store_forDeaggr));//, (int) dp_packet_size(packet_to_store_forDeaggr));
+            //cast payload of packetAggr to array of our my_captured_packet struct
             struct my_captured_packet *checkrecvdAggr = (struct my_captured_packet *) dp_packet_get_udp_payload(packet_to_store_forDeaggr);
 
-
+            //holding structure for ofp_port
+            const struct ofproto_dpif *ofproto = ctx->xin->ofproto;
+            struct ofport_dpif *portDeaggr;
+            //iterate through packets and send accordingly
             for(int j=0; j<PACKET_BUFF_ELEMENTS; j++)
             {
-
-                //VLOG_ERR("ofproto datapath name %s", ofproto->up.name );
 
                 if(j<4)
                 {
                     VLOG_ERR(" sending to  h2 ");
-                    const struct ofproto_dpif *ofproto = ctx->xin->ofproto;
-                    const struct ofport_dpif *portDeaggr;
-                    ofp_port_t out_port = 1;//OFPP_CONTROLLER; //1
+
+                    ofp_port_t out_port = 1;//OFPP_NORMAL; //OFPP_CONTROLLER;
                     portDeaggr = ofp_port_to_ofport(ofproto, out_port);
                     ofproto_dpif_send_packet(portDeaggr, false, checkrecvdAggr[j].packet);   //portDeaggr
                 }
@@ -5328,11 +5300,9 @@ compose_deaggr(struct xlate_ctx *ctx, struct ofpact_deaggr *deaggr)
                 if(j==4)
                 {
                     VLOG_ERR(" sending to  h3 ");
-                    const struct ofproto_dpif *ofproto = ctx->xin->ofproto;
-                    const struct ofport_dpif *portDeaggr;
-                    ofp_port_t out_port = 2;//OFPP_CONTROLLER; //2
+
+                    ofp_port_t out_port = 2;//OFPP_NORMAL; //OFPP_CONTROLLER;
                     portDeaggr = ofp_port_to_ofport(ofproto, out_port);
-                    VLOG_ERR("Invio pacchetto singolo estratto");
                     ofproto_dpif_send_packet(portDeaggr, false, checkrecvdAggr[j].packet); //portDeaggr
                 }
 
