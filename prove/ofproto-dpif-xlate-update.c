@@ -5309,21 +5309,10 @@ compose_deaggr(struct xlate_ctx *ctx, struct ofpact_deaggr *deaggr)
             //VLOG_ERR("structure of pkt received by deaggr: %s ", ofp_dp_packet_to_string(packet_to_store_forDeaggr));//, (int) dp_packet_size(packet_to_store_forDeaggr));
             struct my_captured_packet *checkrecvdAggr = (struct my_captured_packet *) dp_packet_get_udp_payload(packet_to_store_forDeaggr);
 
-            //struct xlate_ctx *myctx = checkrecvdAggr[3].this_ctx;
-            //VLOG_ERR("structure of extracted packet 3: %s", ofp_dp_packet_to_string(myctx->xin->packet));
-            //VLOG_ERR("size of extracted packet 3: %d", checkrecvdAggr[3].sizeofpayload);
-            //VLOG_ERR("structure of extracted packet 4: %s with size_ of %d", ofp_dp_packet_to_string(ctxmine.xin->packet),  dp_packet_size(ctxmine.xin->packet));
+
             for(int j=0; j<PACKET_BUFF_ELEMENTS; j++)
             {
-                //struct xlate_ctx *ctxmine = &checkrecvdAggr[j];
-                //xlate_normal(ctxmine);
-                //int s = dp_packet_l4_size(ctxmine->xin->packet) - UDP_HEADER_LEN;
-                //VLOG_ERR("payload of pacekt %.*s", s, (char *) dp_packet_get_udp_payload(ctxmine->xin->packet));
-                //HMAP_FOR_EACH(NODE, MEMBER, HMAP)
-                /*
-                struct ofproto_dpif *ofproto = ctx->xin->ofproto;
-                struct ofport *port;
-                //struct eth_header *eth = dp_packet_eth(checkrecvdAggr[j].packet);
+
                 HMAP_FOR_EACH(port, hmap_node, &ofproto->up.ports)
                 {
                     //this works!
@@ -5366,11 +5355,7 @@ compose_deaggr(struct xlate_ctx *ctx, struct ofpact_deaggr *deaggr)
 
             }
         }
-        if(eth_addr_equals(eth_preDeaggr->eth_src, test_mac))
-        {
-            //xlate_output_action(ctx, OFPP_NORMAL,0, false, false, false, false);
 
-        }
 
     }
 }
