@@ -361,6 +361,9 @@ enum ofp_raw_action_type {
     /* OF1.0+(81): void. */
     OFPAT_RAW_DEAGGR, //not ofp_port_t
 
+    /* OF1.0+(82): void. */
+    OFPAT_RAW_SPLIT,
+
     /* NX1.3+(48): void. */
     NXAST_RAW_DEC_NSH_TTL,
 
@@ -509,6 +512,8 @@ ofpact_next_flattened(const struct ofpact *ofpact)
 	    return ofpact_next(ofpact);
 	case OFPACT_DEAGGR: //DID STUFF HERE ON TUT.
 	    return ofpact_next(ofpact);
+	case OFPACT_SPLIT:
+        return ofpact_next(ofpact);
     case OFPACT_CHECK_PKT_LARGER:
         return ofpact_next(ofpact);
 
@@ -7639,7 +7644,6 @@ check_GOTO_TABLE(const struct ofpact_goto_table *a,
     }
     return 0;
 }
-
 static void
 encode_DEAGGR(const struct ofpact_deaggr *deaggr OVS_UNUSED,
 		enum ofp_version ofp_version OVS_UNUSED,
@@ -7744,7 +7748,7 @@ parse_AGGRS(char *arg, const struct ofpact_parse_params *pp) //
 {
 
 
-    printf("some aggr parsing stuff %s\n", arg);
+    printf("some aggr parsing stuff on port: %s\n", arg);
     //ofpact_put_AGGRS(pp->ofpacts);
     //struct ofpact_aggrs *ofpactaggrs;
     //ofpactaggrs = ofpact_put_AGGRS(pp->ofpacts);
@@ -7765,6 +7769,51 @@ check_AGGRS(const struct ofpact_aggrs *aggrs,
 {
     return ofpact_check_output_port(aggrs->port, cp->max_ports);
     //return 0;
+}
+////// split translation
+static void
+encode_SPLIT(const struct ofpact_split *split OVS_UNUSED,
+              enum ofp_version ofp_version OVS_UNUSED,
+              struct ofpbuf *out OVS_UNUSED)
+{
+
+    printf("some split encoding stuff \n");
+    put_OFPAT_SPLIT(out);
+}
+static enum ofperr
+decode_OFPAT_RAW_SPLIT(struct ofpbuf *out)
+{
+
+    printf("some split decoding stuff \n");
+    ofpact_put_SPLIT(out);
+
+    return 0;
+}
+static char * OVS_WARN_UNUSED_RESULT
+parse_SPLIT(char *arg, const struct ofpact_parse_params *pp) //
+{
+
+    printf("some split parsing stuff %s\n", arg);
+    ofpact_put_SPLIT(pp->ofpacts);
+
+    return NULL;
+    //return parse_deaggr(arg, pp->ofpacts);
+}
+static void
+format_SPLIT(const struct ofpact_split *split OVS_UNUSED,
+              const struct ofpact_format_params *fp)
+{
+    printf("some split formatting stuff \n");
+    ds_put_format(fp->s, "%ssplit%s", colors.value, colors.end);
+
+}
+static enum ofperr
+check_SPLIT(const struct ofpact_split *split OVS_UNUSED,
+             const struct ofpact_check_params *cp OVS_UNUSED )
+{
+
+    //return ofpact_check_output_port(deaggr->port, cp->max_ports);
+    return 0;
 }
 
 static void
@@ -8007,6 +8056,8 @@ action_set_classify(const struct ofpact *a)
 	    //return ACTION_SLOT_SET_OR_MOVE;
 	    //return ACTION_SLOT_INVALID;
 	case OFPACT_DEAGGR:
+	case OFPACT_SPLIT:
+
     case OFPACT_CHECK_PKT_LARGER:
         return ACTION_SLOT_INVALID;
 
@@ -8213,6 +8264,7 @@ ovs_instruction_type_from_ofpact_type(enum ofpact_type type,
     case OFPACT_CHECK_PKT_LARGER:
     case OFPACT_AGGRS:
     case OFPACT_DEAGGR:
+    case OFPACT_SPLIT:
     default:
         return OVSINST_OFPIT11_APPLY_ACTIONS;
     }
@@ -9071,6 +9123,7 @@ ofpact_outputs_to_port(const struct ofpact *ofpact, ofp_port_t port)
     case OFPACT_AGGRS:
     case OFPACT_DEAGGR:
         //return port == OFPP_NORMAL; //aggiunto
+    case OFPACT_SPLIT:
     case OFPACT_OUTPUT_REG:
     case OFPACT_OUTPUT_TRUNC:
     case OFPACT_BUNDLE:

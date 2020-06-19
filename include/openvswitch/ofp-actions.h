@@ -126,7 +126,8 @@ struct vl_mff_map;
     OFPACT(CHECK_PKT_LARGER, ofpact_check_pkt_larger, ofpact,           \
            "check_pkt_larger")                                          \
     OFPACT(AGGRS,            ofpact_aggrs, 	    ofpact, "aggrs")        \
-    OFPACT(DEAGGR,           ofpact_deaggr, 	    ofpact, "deaggr")       \
+    OFPACT(DEAGGR,           ofpact_deaggr, 	ofpact, "deaggr")       \
+    OFPACT(SPLIT,            ofpact_split, 	    ofpact, "split")        \
     /* Debugging actions.                                               \
      *                                                                  \
      * These are intentionally undocumented, subject to change, and     \
@@ -1130,6 +1131,13 @@ struct ofpact_deaggr{
 	    //uint16_t port;
 	    //ofp_port_t port;
 	    //uint16_t max_len;
+    );
+
+};
+struct ofpact_split{
+    OFPACT_PADDED_MEMBERS(
+        struct ofpact ofpact;
+
     );
 
 };

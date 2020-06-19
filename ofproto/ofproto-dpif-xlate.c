@@ -5190,7 +5190,6 @@ clear_packetBuff(struct my_captured_packet buff_tobe_cleaned[])
 {
     memset(buff_tobe_cleaned, 0, PACKET_BUFF_ELEMENTS * sizeof(struct my_captured_packet));
 }
-
 static void
 compose_aggrs_action(struct xlate_ctx *ctx, struct ofpact_aggrs *aggrs)
 {
@@ -5288,11 +5287,13 @@ compose_deaggr(struct xlate_ctx *ctx) //, struct ofpact_deaggr *deaggr
 
         if(eth_addr_equals(eth_preDeaggr->eth_src, fake_mac))
         {
-
+            //clone packet upond arrival
             struct dp_packet *packet_to_store_forDeaggr = dp_packet_clone(ctx->xin->packet);
 
+            //extract my_captured_packet array by casting the udp payload
             struct my_captured_packet *checkrecvdAggr = (struct my_captured_packet *) dp_packet_get_udp_payload(packet_to_store_forDeaggr);
 
+            //for every packet in the array extract flow from them send it back to the flow table where they will be redirected accordingly
             for(int j=0; j<PACKET_BUFF_ELEMENTS; j++)
             {
 
@@ -5302,7 +5303,6 @@ compose_deaggr(struct xlate_ctx *ctx) //, struct ofpact_deaggr *deaggr
 
                 //VLOG_ERR("The src Ethernet address is "ETH_ADDR_FMT"\n", ETH_ADDR_ARGS(ctx->xin->flow.dl_src));
                 //VLOG_ERR("The dst Ethernet address is "ETH_ADDR_FMT"\n", ETH_ADDR_ARGS(ctx->xin->flow.dl_dst));
-
                 //VLOG_ERR("structure of packet before change: %s ", ofp_dp_packet_to_string(ctx->xin->packet));
 
                 const struct xport *xport = get_ofp_port(ctx->xbridge, 1);
@@ -5327,6 +5327,36 @@ compose_deaggr(struct xlate_ctx *ctx) //, struct ofpact_deaggr *deaggr
 
     }
 }
+static void
+compose_split(struct xlate_ctx *ctx)
+{
+    if(ctx->xin->packet)
+    {
+        struct dp_packet *packet_to_split = dp_packet_clone(ctx->xin->packet);
+        //randomize how much to split the packet
+        int splits = rand() % 10;
+
+        //VLOG_ERR("number of splits: %d", splits);
+        struct my_captured_packet *packets_to_fill  = gen_array_of_packets(splits);
+
+    }
+
+}
+static struct *my_captured_packet
+gen_array_of_packets(int splits)
+{
+    return struct my_captured_packet array_of_split_pkts[splits];
+
+}
+
+
+
+
+
+
+
+
+
 static void
 xlate_output_reg_action(struct xlate_ctx *ctx,
                         const struct ofpact_output_reg *or,
@@ -5787,6 +5817,7 @@ reversible_actions(const struct ofpact *ofpacts, size_t ofpacts_len)
         case OFPACT_ENCAP:
         case OFPACT_AGGRS:
         case OFPACT_DEAGGR:
+        case OFPACT_SPLIT:
         case OFPACT_DECAP:
         case OFPACT_DEC_NSH_TTL:
             return false;
@@ -6090,6 +6121,7 @@ freeze_unroll_actions(const struct ofpact *a, const struct ofpact *end,
         case OFPACT_NAT:
         case OFPACT_AGGRS:
         case OFPACT_DEAGGR:
+        case OFPACT_SPLIT:
         case OFPACT_CHECK_PKT_LARGER:
             /* These may not generate PACKET INs. */
             break;
@@ -6720,6 +6752,7 @@ recirc_for_mpls(const struct ofpact *a, struct xlate_ctx *ctx)
     case OFPACT_CHECK_PKT_LARGER:
     case OFPACT_AGGRS:
     case OFPACT_DEAGGR:
+    case OFPACT_SPLIT:
     default:
         break;
     }
@@ -7186,6 +7219,13 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
             compose_deaggr(ctx);
             break;
         }
+        case OFPACT_SPLIT:
+        {
+            ctx->xout->slow |= SLOW_ACTION;
+            compose_split(ctx);
+            break;
+        }
+
         case OFPACT_DEBUG_RECIRC:
             ctx_trigger_freeze(ctx);
             a = ofpact_next(a);
