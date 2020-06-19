@@ -355,11 +355,11 @@ enum ofp_raw_action_type {
     /* NX1.3+(47): struct nx_action_decap, ... */
     NXAST_RAW_DECAP,
 
-    /* OF1.0+(80): void. */
+    /* OF1.0+(80): uint16_t. */
     OFPAT_RAW_AGGRS,
 
     /* OF1.0+(81): void. */
-    OFPAT_RAW_DEAGGR,
+    OFPAT_RAW_DEAGGR, //not ofp_port_t
 
     /* NX1.3+(48): void. */
     NXAST_RAW_DEC_NSH_TTL,
@@ -7639,15 +7639,17 @@ check_GOTO_TABLE(const struct ofpact_goto_table *a,
     }
     return 0;
 }
+
 static void
-encode_DEAGGR(const struct ofpact_null *aggr OVS_UNUSED,
+encode_DEAGGR(const struct ofpact_deaggr *deaggr OVS_UNUSED,
 		enum ofp_version ofp_version OVS_UNUSED,
 		struct ofpbuf *out OVS_UNUSED)
 {
 
     printf("some deaggr encoding stuff \n");
-
     put_OFPAT_DEAGGR(out);
+    //uint16_t p = deaggr->port;
+    //put_OFPAT_DEAGGR(out, p);
 
 
 }
@@ -7656,82 +7658,113 @@ decode_OFPAT_RAW_DEAGGR(struct ofpbuf *out)
 {
 
     printf("some deaggr decoding stuff \n");
+    ofpact_put_DEAGGR(out);
+    /*
+    struct ofpact_deaggr *deaggr;
+    deaggr = ofpact_put_DEAGGR(out);
+    deaggr->port = p;
+    */
     //OFPAT_RAW_DEAGGR generates an abstract action.
 
-    ofpact_put_DEAGGR(out);
     return 0;
 }
+
 static char * OVS_WARN_UNUSED_RESULT
-parse_DEAGGR(char *arg OVS_UNUSED, const struct ofpact_parse_params *pp) //
+parse_DEAGGR(char *arg, const struct ofpact_parse_params *pp) //
 {
 
     printf("some deaggr parsing stuff %s\n", arg);
     ofpact_put_DEAGGR(pp->ofpacts);
 
     return NULL;
+    //return parse_deaggr(arg, pp->ofpacts);
 }
+
 static void
-format_DEAGGR(const struct ofpact_null *aggr OVS_UNUSED,
+format_DEAGGR(const struct ofpact_deaggr *deaggr OVS_UNUSED,
 		const struct ofpact_format_params *fp)
 {
     printf("some deaggr formatting stuff \n");
     ds_put_format(fp->s , "%sdeaggr%s", colors.value, colors.end);
+    //ds_put_format(fp->s, "deaggr:%"PRIu16, deaggr->port);
 }
 static enum ofperr
-check_DEAGGR(const struct ofpact_null *a OVS_UNUSED,
-	    const struct ofpact_check_params *cp OVS_UNUSED)
+check_DEAGGR(const struct ofpact_deaggr *deaggr OVS_UNUSED,
+	    const struct ofpact_check_params *cp OVS_UNUSED )
 {
 
+    //return ofpact_check_output_port(deaggr->port, cp->max_ports);
     return 0;
 }
+
+////////////////////
 static void
-encode_AGGRS(const struct ofpact_null *aggr OVS_UNUSED,
+encode_AGGRS(const struct ofpact_aggrs *aggrs,
 		enum ofp_version ofp_version OVS_UNUSED,
 		struct ofpbuf *out OVS_UNUSED)
 {
 
     printf("some aggr encoding stuff \n");
-
-    put_OFPAT_AGGRS(out);
-
+    uint16_t p = aggrs->port;
+    put_OFPAT_AGGRS(out, p);
 
 }
 static enum ofperr
-decode_OFPAT_RAW_AGGRS(struct ofpbuf *out)
+decode_OFPAT_RAW_AGGRS(uint16_t p,
+                       enum ofp_version ofp_version OVS_UNUSED,
+                       struct ofpbuf *out)
 {
 
 
     printf("some aggr decoding stuff \n");
     //OFPAT_RAW_AGGRS generates an abstract action.
+    struct ofpact_aggrs *aggrs;
+    aggrs = ofpact_put_AGGRS(out);
+    aggrs->port = p;
 
-    ofpact_put_AGGRS(out);
     return 0;
 }
+//helper for below
 static char * OVS_WARN_UNUSED_RESULT
-parse_AGGRS(char *arg OVS_UNUSED, const struct ofpact_parse_params *pp) //
+parse_aggrs(char *arg, struct ofpbuf *ofpacts)
+{
+    struct ofpact_aggrs *aggrs;
+    uint16_t port;
+    char *error;
+    char *name = "error";
+    error = str_to_u16(arg, name, &port);
+    if (error) return error;
+
+    aggrs = ofpact_put_AGGRS(ofpacts);
+    aggrs->port = port;
+    return NULL;
+}
+static char * OVS_WARN_UNUSED_RESULT
+parse_AGGRS(char *arg, const struct ofpact_parse_params *pp) //
 {
 
 
     printf("some aggr parsing stuff %s\n", arg);
-    ofpact_put_AGGRS(pp->ofpacts);
+    //ofpact_put_AGGRS(pp->ofpacts);
     //struct ofpact_aggrs *ofpactaggrs;
     //ofpactaggrs = ofpact_put_AGGRS(pp->ofpacts);
+    return parse_aggrs(arg, pp->ofpacts);
 
-    return NULL;
 }
 static void
-format_AGGRS(const struct ofpact_null *aggr OVS_UNUSED,
+format_AGGRS(const struct ofpact_aggrs *aggrs,
 		const struct ofpact_format_params *fp)
 {
     printf("some aggr formatting stuff \n");
-    ds_put_format(fp->s , "%saggrs%s", colors.value, colors.end);
+    //ds_put_format(fp->s , "%saggrs%s", colors.value, colors.end);
+    ds_put_format(fp->s, "aggrs:%"PRIu16, aggrs->port);
 }
 static enum ofperr
-check_AGGRS(const struct ofpact_null *a OVS_UNUSED,
-	    const struct ofpact_check_params *cp OVS_UNUSED)
+check_AGGRS(const struct ofpact_aggrs *aggrs,
+	    const struct ofpact_check_params *cp )
 {
-
-    return 0;
+    return ofpact_check_output_port(aggrs->port, cp->max_ports);
+    //return 0;
 }
 
 static void
@@ -9037,6 +9070,7 @@ ofpact_outputs_to_port(const struct ofpact *ofpact, ofp_port_t port)
         return port == OFPP_CONTROLLER;
     case OFPACT_AGGRS:
     case OFPACT_DEAGGR:
+        //return port == OFPP_NORMAL; //aggiunto
     case OFPACT_OUTPUT_REG:
     case OFPACT_OUTPUT_TRUNC:
     case OFPACT_BUNDLE:
