@@ -4034,6 +4034,8 @@ terminate_native_tunnel(struct xlate_ctx *ctx, ofp_port_t ofp_port,
 }
 
 
+//compose_aggr_action
+//compose_deaggr
 
 static void
 compose_output_action__(struct xlate_ctx *ctx, ofp_port_t ofp_port,
@@ -5378,18 +5380,21 @@ compose_split(struct xlate_ctx *ctx)
         struct ofport_dpif *portAggr;
         if(indexstring == 0)
         {
-            //free(fullpayload);
+            free(fullpayload);
             fullpayload = malloc(65000 * sizeof(char));
+            fullpayload[0] = '\0';
             indexstring++;
         }
         if(!eth_addr_equals(eth_pre_split->eth_src, fake_mac))
         {
             struct dp_packet *packet_to_split = dp_packet_clone(ctx->xin->packet); //clone incoming packet
-            //VLOG_ERR("structure of pkt_to_send %s", ofp_dp_packet_to_string(packet_to_split));
-            char *complete_payload = (char *) dp_packet_get_udp_payload(packet_to_split); //get payload of packet
 
-            ///QUA IL BUG PROBABLY CONVERSIONE IN CHAR SI ACCAVALLA SICURO
-
+            char *complete_payload = (char *) dp_packet_get_udp_payload(packet_to_split);
+            //int truepayloadsize =  dp_packet_l4_size(packet_to_split) - UDP_HEADER_LEN;
+            //char complete_payload[truepayloadsize];
+            //memset(complete_payload, 0, truepayloadsize);
+            //memcpy(complete_payload,(char *) dp_packet_get_udp_payload(packet_to_split), truepayloadsize );
+            VLOG_ERR("complete %s", complete_payload);
 
             //split payload, assign each to a packet, embed packet in a my_split_pkt with same csum
             int prev = 0;
@@ -5406,10 +5411,12 @@ compose_split(struct xlate_ctx *ctx)
                     splits = 1;
 
 
-                VLOG_ERR("number of splits: %d", splits);
+                //VLOG_ERR("number of splits: %d", splits);
                 char temp_payload[splits];
-                memcpy(temp_payload, &complete_payload[prev], splits);
+                strncpy(temp_payload, &complete_payload[prev], splits);
 
+                temp_payload[splits] = '\0';
+                VLOG_ERR("What I'm copying in split packet %s\n", temp_payload);
                 //create single split packet
                 struct dp_packet *temp_packet = dp_packet_new(100);
                 struct flow flow;
@@ -5418,7 +5425,7 @@ compose_split(struct xlate_ctx *ctx)
 
 
 
-                //create sendable packet containing split packet
+                //create packet containing split packet and other information, send this packet to next hop
                 sequence++;
                 struct dp_packet *pkt_to_send = dp_packet_new(100);
                 struct my_split_packet s_pkt;
@@ -5447,8 +5454,8 @@ compose_split(struct xlate_ctx *ctx)
                 //ofp_port_t out_port = (randport > 0) ? randport : 1;
                 portAggr = ofp_port_to_ofport(ofprotodpif, maxport);
                 ofproto_dpif_send_packet(portAggr, false, pkt_to_send);
-                dp_packet_delete(pkt_to_send); //elimina per ricostruire, non serve molto
-
+                //dp_packet_delete(pkt_to_send); //elimina per ricostruire, non serve molto
+                //dp_packet_delete(temp_packet);
 
                 prev += splits;
                 rem -= splits;
@@ -5458,13 +5465,10 @@ compose_split(struct xlate_ctx *ctx)
                     memset(temp_payload, 0, splits);
                     break;
                 }
-
-
-                //VLOG_ERR("temp_payload %s", temp_payload);
                 memset(temp_payload, 0, splits);
-                //VLOG_ERR("len payload %ld", strlen(temp_payload));
+                //VLOG_ERR("cancellato payload: %s", temp_payload);
             }
-
+            //memset(complete_payload, 0, truepayloadsize);
             //send
         }
         if(eth_addr_equals(eth_pre_split->eth_src, fake_mac))
@@ -5478,25 +5482,57 @@ compose_split(struct xlate_ctx *ctx)
             // payload length so i'm sure it'll hold all splits
             struct my_split_packet hold_splits[s_pkt.sizeofpayload];
 
-
-
+            int z = dp_packet_l4_size(s_pkt.packet) - UDP_HEADER_LEN;
+            VLOG_ERR("payload ricevuto %.*s", z, (char *) dp_packet_get_udp_payload(s_pkt.packet));
+            VLOG_ERR("con seq %d" , s_pkt.seq);
             indexholds += temp_seq;
             //VLOG_ERR("ho creato %s", fullpayload);
             if(s_pkt.seq == temp_seq)
             {
-
                 int size_split = dp_packet_l4_size(s_pkt.packet) - UDP_HEADER_LEN;
                 strncat(fullpayload, (char *) dp_packet_get_udp_payload(s_pkt.packet), (size_t) size_split);
+
                 VLOG_ERR("primo strncat %s", fullpayload);
+                temp_seq++;
                 if(strlen(fullpayload) == s_pkt.sizeofpayload)
                 {
-                    //send full payload
+
+                    //fullpayload[s_pkt.sizeofpayload+] ='\0';
                     VLOG_ERR("mando questo %s", fullpayload);
+
+                    //send full payload
+                    //create packet with info from one of the splits since they should all be the same
+                    struct dp_packet *reass_pkt = dp_packet_new(100);
+                    struct flow flow;
+                    flow_extract(s_pkt.packet, &flow); //extract flow from original pkt since all splits should carry same info except payload
+                    flow_compose(reass_pkt, &flow, (char *) fullpayload, strlen(fullpayload)); //u
+
+
+                    flow_extract(reass_pkt, &ctx->xin->flow);
+                    //resubmit reassembled pkt to table for redirection to correct destination
+                    const struct xport *xport = get_ofp_port(ctx->xbridge, 1);
+                    ovs_version_t version = ofproto_dpif_get_tables_version(xport->xbridge->ofproto);
+
+                    struct ofpact_resubmit res;
+                    ofpact_init(&res.ofpact, OFPACT_RESUBMIT, sizeof res);
+                    res.in_port = 2;
+                    res.table_id = 0;
+                    res.with_ct_orig = false;
+                    //look here compose_table_xlate
+
+                    ofproto_dpif_execute_actions__(ctx->xin->ofproto,//xport->xbridge->ofproto,
+                                                   version, &ctx->xin->flow,
+                                                   NULL,
+                                                   &res.ofpact, sizeof res,
+                                                   ctx->depth, ctx->resubmits,
+                                                   reass_pkt);
+
                     temp_seq = 1;
                     indexholds = 0;
                     indexstring = 0;
+
                 }
-                temp_seq++;
+
                 //append to original payload char
                 if(checknextpiece(hold_splits, temp_seq))
                 {
@@ -5512,10 +5548,6 @@ compose_split(struct xlate_ctx *ctx)
             }
 
 
-
-
-            //char * strncat ( char * destination, const char * source, size_t num );
-            //reassemble splits
         }
 
 
@@ -5524,16 +5556,6 @@ compose_split(struct xlate_ctx *ctx)
     }
 
 }
-
-
-
-
-
-
-
-
-
-
 
 static void
 xlate_output_reg_action(struct xlate_ctx *ctx,
