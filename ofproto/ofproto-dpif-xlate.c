@@ -5327,35 +5327,208 @@ compose_deaggr(struct xlate_ctx *ctx) //, struct ofpact_deaggr *deaggr
 
     }
 }
+static int
+getmaxport(struct ofport *port,struct ofproto_dpif *ofprotodpif)
+{
+    int max = 0;
+    HMAP_FOR_EACH(port, hmap_node, &ofprotodpif->up.ports)
+    {
+        if((int) port->ofp_port <= 65280)
+        {
+            max = ( max > (int) port->ofp_port ) ? max : (int) port->ofp_port;
+        }
+
+    }
+    return max;
+}
+
+struct my_split_packet
+{
+    struct dp_packet *packet;
+    int seq;
+    int sizeofpayload;
+    int tot_splits;
+    ovs_be16 udp_csum;
+
+
+};
+
+//CREATE DICTIONARY
+struct csum_to_payload
+{
+    ovs_be16 csumkey;
+    char *payload;
+};
+
+static int
+check_csum_exists(struct csum_to_payload *ctp, struct my_split_packet spkt)
+{
+    for(int csum_i=0; csum_i < 100; csum_i++)
+    {
+        //if csum already in array update corresponding payload
+        if(ctp[csum_i].csumkey == spkt.udp_csum)
+        {
+            return csum_i;
+        }
+
+    }
+    return NULL;
+}
+
+static int temp_seq = 1;
+static int indexholds = 0;
+static char *fullpayload;// = malloc(1000 * sizeof(char)); //[s_pkt.sizeofpayload];
+static int indexstring = 0;
 static void
 compose_split(struct xlate_ctx *ctx)
 {
+    struct eth_addr fake_mac = ETH_ADDR_C(44,34,56,78,9a,bc);
+
     if(ctx->xin->packet)
     {
-        struct dp_packet *packet_to_split = dp_packet_clone(ctx->xin->packet);
-        //randomize how much to split the packet
-        int splits = rand() % 10;
+        struct eth_header *eth_pre_split = dp_packet_eth(ctx->xin->packet);
 
-        //VLOG_ERR("number of splits: %d", splits);
-        struct my_captured_packet *packets_to_fill  = gen_array_of_packets(splits);
+        //holding structure to calculate port and send packet
+        struct ofport *port;
+        struct ofproto_dpif *ofprotodpif = ctx->xin->ofproto;
+        struct ofport_dpif *portAggr;
+        if(indexstring == 0)
+        {
+            free(fullpayload);
+            fullpayload = malloc(65000 * sizeof(char));
+            fullpayload[0] = '\0';
+            indexstring++;
+        }
+        if(!eth_addr_equals(eth_pre_split->eth_src, fake_mac))
+        {
+            struct dp_packet *packet_to_split = dp_packet_clone(ctx->xin->packet); //clone incoming packet
+
+            char *complete_payload = (char *) dp_packet_get_udp_payload(packet_to_split);
+            //int truepayloadsize =  dp_packet_l4_size(packet_to_split) - UDP_HEADER_LEN;
+            //char complete_payload[truepayloadsize];
+            //memset(complete_payload, 0, truepayloadsize);
+            //memcpy(complete_payload,(char *) dp_packet_get_udp_payload(packet_to_split), truepayloadsize );
+            VLOG_ERR("complete %s", complete_payload);
+
+            //split payload, assign each to a packet, embed packet in a my_split_pkt with same csum
+
+            int rem = dp_packet_l4_size(packet_to_split) - UDP_HEADER_LEN;
+            int size_payload = dp_packet_l4_size(packet_to_split) - UDP_HEADER_LEN;
+            //VLOG_ERR("REM %d\n", rem);
+            int split_arr[rem];
+            int indexsplit = 0;
+            int countsplits = 0;
+            //VLOG_ERR("payload: %.*s", rem, complete_payload);
+            while(rem > 0)
+            {
+                int splits = rand() % rem;
+                //causes splits to be 1 many times maybe do something here
+                if(splits == 0)
+                    splits = 1;
+
+                split_arr[indexsplit] = splits;
+                VLOG_ERR("splits %d\n", split_arr[indexsplit]);
+                countsplits++;
+                rem -= splits;
+                indexsplit++;
+
+            }
+            //size_t arr_len = sizeof(split_arr)/sizeof(split_arr[0]);
+            int prev = 0;
+            //VLOG_ERR("arrlen %ld", arr_len);
+            int sequence = 1;
+            for(int i = 0; i<countsplits; i++ )
+            {
+                VLOG_ERR("split_arr[i] %d", split_arr[i]);
+                if(split_arr[i] == 0) break; //exit loop since no more splits are available
+
+                char temp_payload[size_payload];
+                strncpy(temp_payload, &complete_payload[prev], split_arr[i]);
+                temp_payload[split_arr[i]] = '\0'; //add end of line
+
+                VLOG_ERR("What I'm copying in split packet %s\n", temp_payload);
+                //create single split packet
+                struct dp_packet *temp_packet = dp_packet_new(100);
+                struct flow flow;
+                flow_extract(packet_to_split, &flow); //extract flow from original pkt since all splits should carry same info except payload
+                flow_compose(temp_packet, &flow, (char *) temp_payload, sizeof temp_payload); //use the flow to build a new packet containing part of original payload
+
+                //create packet containing split packet and other information, send this packet to next hop
+                struct dp_packet *pkt_to_send = dp_packet_new(100);
+                struct my_split_packet s_pkt;
+                struct udp_header *udph = dp_packet_l4(packet_to_split);
+                s_pkt.packet = temp_packet;
+                s_pkt.seq = sequence;
+                s_pkt.sizeofpayload = dp_packet_l4_size(packet_to_split) - UDP_HEADER_LEN;
+                s_pkt.tot_splits = countsplits;
+                s_pkt.udp_csum = udph->udp_csum;
+
+                struct flow my_flow;
+                flow_extract(packet_to_split, &my_flow);
+                flow_compose(pkt_to_send, &my_flow, &s_pkt, sizeof s_pkt);
+
+                /*this modifies the packet info but somehow the flows don't match on dl_src or dst POSSIBLE BUG HERE nothing too serious */
+                struct eth_header *eth_hdr_for_splits = dp_packet_eth(pkt_to_send);
+                eth_hdr_for_splits->eth_src = fake_mac;
+
+                int maxport = getmaxport(port, ofprotodpif);
+
+                //send, port is chosen randomly on the assumption that if port x exists then all ports < x exist as well
+                //shiit remember to remove port that links with original sending host, stuff below works but includes it, so for now
+                //just send to maxport i.e. 2
+                //int randport = rand() % maxport;
+                //ofp_port_t out_port = (randport > 0) ? randport : 1;
+                portAggr = ofp_port_to_ofport(ofprotodpif, maxport);
+                ofproto_dpif_send_packet(portAggr, false, pkt_to_send);
+
+                prev += split_arr[i];
+                sequence++;
+                memset(temp_payload, 0, split_arr[i]);
+            }
+
+        }
+        if(eth_addr_equals(eth_pre_split->eth_src, fake_mac))
+        {
+            //VLOG_ERR("entro nel split reassemble");
+            struct dp_packet *split_recvd = dp_packet_clone(ctx->xin->packet);
+
+            struct my_split_packet *s_pktarr = (struct my_split_packet *) dp_packet_get_udp_payload(split_recvd);
+            //pkt containing packet we need to send
+            struct my_split_packet s_pkt = *s_pktarr;
+            //create structure of my_split_packet to hold all packets out of order, size is equal to original
+            // payload length so i'm sure it'll hold all splits
+            struct my_split_packet hold_splits[s_pkt.tot_splits];
+
+            struct csum_to_payload hold_to_rebuild[100];
+            //implementare un dizionario
+            index_to_rebuild = 1;
+            if( check_csum_exists(hold_to_rebuild, s_pkt) > 0)
+            {
+                int size_split = dp_packet_l4_size(s_pkt.packet) - UDP_HEADER_LEN;
+                //char split_payload[size_split];
+                //controllo size stringa in struct, se 0 allocala a grandezza payload se > 0 fai direttamente lo string copy
+                //char *complete_split = (char *) dp_packet_get_udp_payload(packet_to_split);
+                //strncpy(split_payload, &complete_split[0], size_split);
+                //split_payload[size_split] = '\0';
+            }
+            int countrecvd  = 0;
+
+            if(countrecvd == s_pkt.tot_splits)
+            {
+                //assemble payload and send
+
+            }
+            else
+
+
+        }
+
+
+
 
     }
 
 }
-static struct *my_captured_packet
-gen_array_of_packets(int splits)
-{
-    return struct my_captured_packet array_of_split_pkts[splits];
-
-}
-
-
-
-
-
-
-
-
 
 static void
 xlate_output_reg_action(struct xlate_ctx *ctx,
