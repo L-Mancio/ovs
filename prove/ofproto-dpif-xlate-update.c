@@ -5405,7 +5405,7 @@ reassemble_message(struct my_split_packet *msp)
 static int temp_seq = 1;
 static int indexholds = 0;
 static char *fullpayload;// = malloc(1000 * sizeof(char)); //[s_pkt.sizeofpayload];
-//static int indexstring = 0;
+//static int indexstring = 0; //not used
 static int i_removed = 0;
 
 
