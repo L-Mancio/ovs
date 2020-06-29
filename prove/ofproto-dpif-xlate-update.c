@@ -5347,24 +5347,68 @@ struct my_split_packet
     struct dp_packet *packet;
     int seq;
     int sizeofpayload;
+    int tot_splits;
     ovs_be16 udp_csum;
 
 
 };
-static bool
-checknextpiece(struct my_split_packet *sp, int seq)
+
+//CREATE DICTIONARY
+struct csum_to_payload
 {
-    if(sp[seq].seq == seq)
+    ovs_be16 csumkey;
+    struct my_split_packet *to_reassemble;
+    int arrived;
+};
+
+static int
+check_csum_exists(struct csum_to_payload *ctp, struct my_split_packet spkt)
+{
+    for(int csum_i=0; csum_i < 100; csum_i++)
     {
-        return true;
+        //if csum already in array update corresponding payload
+        if(ctp[csum_i].csumkey == spkt.udp_csum)
+        {
+            return csum_i;
+        }
+
     }
-    else return false;
+    return -1;
+}
+/*
+ * struct my_split_packet
+{
+    struct dp_packet *packet;
+    int seq;
+    int sizeofpayload;
+    int tot_splits;
+    ovs_be16 udp_csum;
+
+
+};
+
+ */
+static char *
+reassemble_message(struct my_split_packet *msp)
+{
+    char temp_payload[msp[0].sizeofpayload];
+    for(int i=0; i < msp[0].sizeofpayload; i++)
+    {
+        int size_split = dp_packet_l4_size(msp[i].packet) - UDP_HEADER_LEN;
+        strncat(&temp_payload, (char *) dp_packet_get_udp_payload(msp[i].packet), (size_t) size_split);
+        temp_payload[size_split] = '\0';
+
+    }
+    return &temp_payload;
 }
 
 static int temp_seq = 1;
 static int indexholds = 0;
 static char *fullpayload;// = malloc(1000 * sizeof(char)); //[s_pkt.sizeofpayload];
 static int indexstring = 0;
+static int i_removed = 0;
+
+
 static void
 compose_split(struct xlate_ctx *ctx)
 {
@@ -5397,25 +5441,40 @@ compose_split(struct xlate_ctx *ctx)
             VLOG_ERR("complete %s", complete_payload);
 
             //split payload, assign each to a packet, embed packet in a my_split_pkt with same csum
-            int prev = 0;
+
             int rem = dp_packet_l4_size(packet_to_split) - UDP_HEADER_LEN;
-            int sequence = 0;
+            int size_payload = dp_packet_l4_size(packet_to_split) - UDP_HEADER_LEN;
+            //VLOG_ERR("REM %d\n", rem);
+            int split_arr[rem];
+            int indexsplit = 0;
+            int countsplits = 0;
             //VLOG_ERR("payload: %.*s", rem, complete_payload);
-            while(true)
+            while(rem > 0)
             {
-
                 int splits = rand() % rem;
-
                 //causes splits to be 1 many times maybe do something here
                 if(splits == 0)
                     splits = 1;
 
+                split_arr[indexsplit] = splits;
+                VLOG_ERR("splits %d\n", split_arr[indexsplit]);
+                countsplits++;
+                rem -= splits;
+                indexsplit++;
 
-                //VLOG_ERR("number of splits: %d", splits);
-                char temp_payload[splits];
-                strncpy(temp_payload, &complete_payload[prev], splits);
+            }
+            //size_t arr_len = sizeof(split_arr)/sizeof(split_arr[0]);
+            int prev = 0;
+            int sequence = 1;
+            for(int i = 0; i<countsplits; i++ )
+            {
+                VLOG_ERR("split_arr[i] %d", split_arr[i]);
+                if(split_arr[i] == 0) break; //exit loop since no more splits are available
 
-                temp_payload[splits] = '\0';
+                char temp_payload[size_payload];
+                strncpy(temp_payload, &complete_payload[prev], split_arr[i]);
+                temp_payload[split_arr[i]] = '\0'; //add end of line
+
                 VLOG_ERR("What I'm copying in split packet %s\n", temp_payload);
                 //create single split packet
                 struct dp_packet *temp_packet = dp_packet_new(100);
@@ -5423,18 +5482,15 @@ compose_split(struct xlate_ctx *ctx)
                 flow_extract(packet_to_split, &flow); //extract flow from original pkt since all splits should carry same info except payload
                 flow_compose(temp_packet, &flow, (char *) temp_payload, sizeof temp_payload); //use the flow to build a new packet containing part of original payload
 
-
-
                 //create packet containing split packet and other information, send this packet to next hop
-                sequence++;
                 struct dp_packet *pkt_to_send = dp_packet_new(100);
                 struct my_split_packet s_pkt;
                 struct udp_header *udph = dp_packet_l4(packet_to_split);
                 s_pkt.packet = temp_packet;
                 s_pkt.seq = sequence;
                 s_pkt.sizeofpayload = dp_packet_l4_size(packet_to_split) - UDP_HEADER_LEN;
+                s_pkt.tot_splits = countsplits;
                 s_pkt.udp_csum = udph->udp_csum;
-
 
                 struct flow my_flow;
                 flow_extract(packet_to_split, &my_flow);
@@ -5444,7 +5500,6 @@ compose_split(struct xlate_ctx *ctx)
                 struct eth_header *eth_hdr_for_splits = dp_packet_eth(pkt_to_send);
                 eth_hdr_for_splits->eth_src = fake_mac;
 
-                //get max possible port number
                 int maxport = getmaxport(port, ofprotodpif);
 
                 //send, port is chosen randomly on the assumption that if port x exists then all ports < x exist as well
@@ -5454,105 +5509,64 @@ compose_split(struct xlate_ctx *ctx)
                 //ofp_port_t out_port = (randport > 0) ? randport : 1;
                 portAggr = ofp_port_to_ofport(ofprotodpif, maxport);
                 ofproto_dpif_send_packet(portAggr, false, pkt_to_send);
-                //dp_packet_delete(pkt_to_send); //elimina per ricostruire, non serve molto
-                //dp_packet_delete(temp_packet);
 
-                prev += splits;
-                rem -= splits;
-
-                if(rem == 0)
-                {
-                    memset(temp_payload, 0, splits);
-                    break;
-                }
-                memset(temp_payload, 0, splits);
-                //VLOG_ERR("cancellato payload: %s", temp_payload);
+                prev += split_arr[i];
+                sequence++;
+                memset(temp_payload, 0, split_arr[i]);
             }
-            //memset(complete_payload, 0, truepayloadsize);
-            //send
+
         }
         if(eth_addr_equals(eth_pre_split->eth_src, fake_mac))
         {
             //VLOG_ERR("entro nel split reassemble");
             struct dp_packet *split_recvd = dp_packet_clone(ctx->xin->packet);
+
             struct my_split_packet *s_pktarr = (struct my_split_packet *) dp_packet_get_udp_payload(split_recvd);
-
+            //pkt containing packet we need to send
             struct my_split_packet s_pkt = *s_pktarr;
-            //create structure of my_split_packet to hold all packets out of order, size is equal to original
-            // payload length so i'm sure it'll hold all splits
-            struct my_split_packet hold_splits[s_pkt.sizeofpayload];
 
-            int z = dp_packet_l4_size(s_pkt.packet) - UDP_HEADER_LEN;
-            VLOG_ERR("payload ricevuto %.*s", z, (char *) dp_packet_get_udp_payload(s_pkt.packet));
-            VLOG_ERR("con seq %d" , s_pkt.seq);
-            indexholds += temp_seq;
-            //VLOG_ERR("ho creato %s", fullpayload);
-            if(s_pkt.seq == temp_seq)
+
+            struct csum_to_payload hold_to_rebuild[100];
+
+            int pkts_to_rebuild = 0;
+
+            int i_csum = check_csum_exists(hold_to_rebuild, s_pkt);
+            if(i_csum >= 0) //check_csum_exists(hold_to_rebuild, s_pkt)
             {
-                int size_split = dp_packet_l4_size(s_pkt.packet) - UDP_HEADER_LEN;
-                strncat(fullpayload, (char *) dp_packet_get_udp_payload(s_pkt.packet), (size_t) size_split);
+                hold_to_rebuild[i_csum].to_reassemble[s_pkt.seq] = s_pkt;
+                hold_to_rebuild[i_csum].arrived++;
 
-                VLOG_ERR("primo strncat %s", fullpayload);
-                temp_seq++;
-                if(strlen(fullpayload) == s_pkt.sizeofpayload)
+                if( hold_to_rebuild[i_csum].arrived == s_pkt.tot_splits )
                 {
 
-                    //fullpayload[s_pkt.sizeofpayload+] ='\0';
-                    VLOG_ERR("mando questo %s", fullpayload);
-
-                    //send full payload
-                    //create packet with info from one of the splits since they should all be the same
-                    struct dp_packet *reass_pkt = dp_packet_new(100);
-                    struct flow flow;
-                    flow_extract(s_pkt.packet, &flow); //extract flow from original pkt since all splits should carry same info except payload
-                    flow_compose(reass_pkt, &flow, (char *) fullpayload, strlen(fullpayload)); //u
-
-
-                    flow_extract(reass_pkt, &ctx->xin->flow);
-                    //resubmit reassembled pkt to table for redirection to correct destination
-                    const struct xport *xport = get_ofp_port(ctx->xbridge, 1);
-                    ovs_version_t version = ofproto_dpif_get_tables_version(xport->xbridge->ofproto);
-
-                    struct ofpact_resubmit res;
-                    ofpact_init(&res.ofpact, OFPACT_RESUBMIT, sizeof res);
-                    res.in_port = 2;
-                    res.table_id = 0;
-                    res.with_ct_orig = false;
-                    //look here compose_table_xlate
-
-                    ofproto_dpif_execute_actions__(ctx->xin->ofproto,//xport->xbridge->ofproto,
-                                                   version, &ctx->xin->flow,
-                                                   NULL,
-                                                   &res.ofpact, sizeof res,
-                                                   ctx->depth, ctx->resubmits,
-                                                   reass_pkt);
-
-                    temp_seq = 1;
-                    indexholds = 0;
-                    indexstring = 0;
-
+                    //assemble string and send, remove contents at that index, set i_removed to that index, decrease counter pkts_to_rebuild
+                    char *reass_payload = reassemble_message(hold_to_rebuild[i_csum].to_reassemble);
+                    i_removed = i_csum;
+                    pkts_to_rebuild--;
                 }
 
-                //append to original payload char
-                if(checknextpiece(hold_splits, temp_seq))
-                {
-                    VLOG_ERR("strncat of next piece %s", fullpayload);
-                    size_split = dp_packet_l4_size(hold_splits[temp_seq].packet) - UDP_HEADER_LEN;
-                    strncat(fullpayload, (char *) dp_packet_get_udp_payload(hold_splits[temp_seq].packet), (size_t) size_split);
-                    temp_seq++;
-                }
             }
-            else
+            if( i_csum == -1 && pkts_to_rebuild < 100) //if pkts_to_rebuild == 100 drop packets
             {
-                hold_splits[s_pkt.seq] = s_pkt;
+                while(hold_to_rebuild[i_removed] != 0 && i_removed < 100)
+                {
+                    i_removed++;
+                }
+                if(i_removed >= 100)
+                {
+                    VLOG_ERR("packets are getting dropped array is full");
+                }
+                else
+                {
+                    hold_to_rebuild[i_removed].csumkey = s_pkt.udp_csum;
+                    hold_to_rebuild[i_removed].to_reassemble  = malloc(s_pkt.tot_splits * sizeof(struct my_split_packet));
+                    hold_to_rebuild[i_removed].to_reassemble[s_pkt.seq] = s_pkt;
+                    hold_to_rebuild[i_removed].arrived++;
+                    pkts_to_rebuild++; //increase counter of packets to rebuild present in list
+
+                }
             }
-
-
         }
-
-
-
-
     }
 
 }
