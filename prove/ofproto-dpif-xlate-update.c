@@ -5405,7 +5405,7 @@ reassemble_message(struct my_split_packet *msp)
 static int temp_seq = 1;
 static int indexholds = 0;
 static char *fullpayload;// = malloc(1000 * sizeof(char)); //[s_pkt.sizeofpayload];
-static int indexstring = 0;
+//static int indexstring = 0;
 static int i_removed = 0;
 
 
@@ -5541,6 +5541,32 @@ compose_split(struct xlate_ctx *ctx)
 
                     //assemble string and send, remove contents at that index, set i_removed to that index, decrease counter pkts_to_rebuild
                     char *reass_payload = reassemble_message(hold_to_rebuild[i_csum].to_reassemble);
+
+                    //send
+                    struct flow flow;
+                    //temp packet to rebuild flow
+                    struct dp_packet *temp_packet = hold_to_rebuild[i_csum].to_reassemble[0].packet;
+                    flow_extract(temp_packet, &flow); //extract flow from original pkt since all splits should carry same info except payload
+                    flow_compose(temp_packet, &flow, (char *) reass_payload, sizeof reass_payload);
+
+                    /* stuff to resubmit reassembled packet and send to correct port */
+                    const struct xport *xport = get_ofp_port(ctx->xbridge, 1);
+                    ovs_version_t version = ofproto_dpif_get_tables_version(xport->xbridge->ofproto);
+
+                    struct ofpact_resubmit res;
+                    ofpact_init(&res.ofpact, OFPACT_RESUBMIT, sizeof res);
+                    res.in_port = 2;//might be a needed parameter to give as input to the new actions
+                    res.table_id = 0;
+                    res.with_ct_orig = false;
+                    //look here compose_table_xlate
+
+                    ofproto_dpif_execute_actions__(ctx->xin->ofproto,//xport->xbridge->ofproto,
+                                                   version, &ctx->xin->flow,
+                                                   NULL,
+                                                   &res.ofpact, sizeof res,
+                                                   ctx->depth, ctx->resubmits,
+                                                   temp_packet);
+                    //update counters
                     i_removed = i_csum;
                     pkts_to_rebuild--;
                 }
