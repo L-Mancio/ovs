@@ -5466,8 +5466,8 @@ compose_split(struct xlate_ctx *ctx)
 
 
             int prev = 0;
-            int sequence = 0; // MEGA BUG??? DOVREI CONTROLLARE IL CHECKSUM PRIMA DI INCREMENTARE IL SEQUENCE NUMBER???
-            // altrimenti pacchetti diversi ricevono numero di sequenza a prescindere se il precedente fa parte della stessa "famiglia"
+            int sequence = 0; // BUG??? DOVREI CONTROLLARE IL CHECKSUM PRIMA DI INCREMENTARE IL SEQUENCE NUMBER??? no ogni pacchetto e` scomposto singolarmente
+
             for(int i = 0; i < countsplits; i++)
             {
                 VLOG_ERR("split_arr[i] %d", split_arr[i]); //the length of split i
