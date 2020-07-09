@@ -5262,7 +5262,7 @@ compose_aggrs_action(struct xlate_ctx *ctx, struct ofpact_aggrs *aggrs)
 {
     //c(ctx->odp_actions, OVS_ACTION_ATTR_AGGRS, aggrs->port);
     struct eth_addr fake_mac = ETH_ADDR_C(12,34,56,78,9a,bc); //fake mac to distinguish Packet Aggregate
-    VLOG_ERR("I'M BACCK");
+
     if(index1 < 5 && ctx->xin->packet)
     {
         VLOG_ERR("index1: %d", index1);
