@@ -355,8 +355,8 @@ enum ofp_raw_action_type {
     /* NX1.3+(47): struct nx_action_decap, ... */
     NXAST_RAW_DECAP,
 
-    /* OF1.0+(80): uint16_t. */
-    OFPAT_RAW_AGGRS,
+    /* OF1.0+(80): struct ofp_action_aggrs. */
+    OFPAT_RAW_AGGRS, //
 
     /* OF1.0+(81): void. */
     OFPAT_RAW_DEAGGR, //not ofp_port_t
@@ -619,6 +619,9 @@ encode_OUTPUT(const struct ofpact_output *output,
         struct ofp10_action_output *oao;
 
         oao = put_OFPAT10_OUTPUT(out);
+        //uint16_t htons(uint16_t hostshort);
+        //The htons() function converts the unsigned short integer hostshort from
+        // host byte order to network byte order. sooo ovs_be32 e` network byte order
         oao->port = htons(ofp_to_u16(output->port));
         oao->max_len = htons(output->max_len);
     } else {
@@ -7702,73 +7705,81 @@ check_DEAGGR(const struct ofpact_deaggr *deaggr OVS_UNUSED,
 }
 
 ////////////////////
+struct ofp_action_aggrs {
+    ovs_be16 type;                    /* OFPAT_AGGRS. */
+    ovs_be16 len;                     /*  8. */
+    ovs_be16 port;
+    ovs_be16 fl_id;
+
+};
+OFP_ASSERT(sizeof(struct ofp_action_aggrs) == 8);
 static void
 encode_AGGRS(const struct ofpact_aggrs *aggrs,
-		enum ofp_version ofp_version OVS_UNUSED,
-		struct ofpbuf *out OVS_UNUSED)
+             enum ofp_version ofp_version OVS_UNUSED,
+             struct ofpbuf *out )
 {
 
+    //VLOG_ERR("sizeof ofpact: %ld ", sizeof(struct ofp_action_aggrs));
     printf("some aggr encoding stuff \n");
-    uint16_t p = aggrs->port;
-    put_OFPAT_AGGRS(out, p);
+    struct ofp_action_aggrs *o_aggrs;
+    o_aggrs = put_OFPAT_AGGRS(out);
+    o_aggrs->port = htons(aggrs->port);
+    o_aggrs->fl_id = htons(aggrs->flowid);
+
+
 
 }
 static enum ofperr
-decode_OFPAT_RAW_AGGRS(uint16_t p,
-                       enum ofp_version ofp_version OVS_UNUSED,
+decode_OFPAT_RAW_AGGRS(const struct ofp_action_aggrs *o_aggrs,
+                       enum ofp_version ofp_version OVS_UNUSED, // //uint16_t p, int fl,
                        struct ofpbuf *out)
 {
-
-
-    printf("some aggr decoding stuff \n");
     //OFPAT_RAW_AGGRS generates an abstract action.
     struct ofpact_aggrs *aggrs;
+
     aggrs = ofpact_put_AGGRS(out);
-    aggrs->port = p;
+    aggrs->port = ntohs(o_aggrs->port);
+    aggrs->flowid = ntohs(o_aggrs->fl_id);
 
     return 0;
 }
-//helper for below
-static char * OVS_WARN_UNUSED_RESULT
-parse_aggrs(char *arg, struct ofpbuf *ofpacts)
-{
-    struct ofpact_aggrs *aggrs;
-    uint16_t port;
-    char *error;
-    char *name = "error";
-    error = str_to_u16(arg, name, &port);
-    if (error) return error;
 
-    aggrs = ofpact_put_AGGRS(ofpacts);
-    aggrs->port = port;
-    return NULL;
-}
 static char * OVS_WARN_UNUSED_RESULT
 parse_AGGRS(char *arg, const struct ofpact_parse_params *pp) //
 {
 
 
-    printf("some aggr parsing stuff on port: %s\n", arg);
-    //ofpact_put_AGGRS(pp->ofpacts);
-    //struct ofpact_aggrs *ofpactaggrs;
-    //ofpactaggrs = ofpact_put_AGGRS(pp->ofpacts);
-    return parse_aggrs(arg, pp->ofpacts);
+    uint16_t port;
+    uint16_t fl_id;
+    char *error;
+    char *error2;
+
+    //printf("arg from parse_AGGRS, should contain port and id: %s %s %s \n", &arg[0], &arg[1], &arg[2]);
+    struct ofpact_aggrs *aggrs;
+    aggrs =  ofpact_put_AGGRS(pp->ofpacts);
+    error = str_to_u16(&arg[0], "port_for_aggr", &port); //
+    error2 = str_to_u16(&arg[2], "flowid", &fl_id);
+    aggrs->port = port;
+    aggrs->flowid = fl_id;
+    arg[2] = '\0';
+    VLOG_ERR("error2: %s", error2);
+    return error;
 
 }
 static void
 format_AGGRS(const struct ofpact_aggrs *aggrs,
-		const struct ofpact_format_params *fp)
+             const struct ofpact_format_params *fp)
 {
     printf("some aggr formatting stuff \n");
     //ds_put_format(fp->s , "%saggrs%s", colors.value, colors.end);
-    ds_put_format(fp->s, "aggrs:%"PRIu16, aggrs->port);
+    ds_put_format(fp->s, "aggrs:%"PRIu16";flowid:%d", aggrs->port, aggrs->flowid);
 }
 static enum ofperr
-check_AGGRS(const struct ofpact_aggrs *aggrs,
-	    const struct ofpact_check_params *cp )
+check_AGGRS(const struct ofpact_aggrs *aggrs OVS_UNUSED,
+            const struct ofpact_check_params *cp OVS_UNUSED)
 {
-    return ofpact_check_output_port(aggrs->port, cp->max_ports);
-    //return 0;
+    //return ofpact_check_output_port(aggrs->port, cp->max_ports);
+    return 0;
 }
 ////// split translation
 static void
@@ -8054,7 +8065,7 @@ action_set_classify(const struct ofpact *a)
     case OFPACT_DEBUG_SLOW:
     case OFPACT_AGGRS:
 	    //return ACTION_SLOT_SET_OR_MOVE;
-	    //return ACTION_SLOT_INVALID;
+
 	case OFPACT_DEAGGR:
 	case OFPACT_SPLIT:
 
