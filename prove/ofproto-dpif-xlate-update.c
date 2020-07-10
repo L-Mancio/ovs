@@ -5171,10 +5171,11 @@ xlate_output_action(struct xlate_ctx *ctx, ofp_port_t port,
 #define UDP_MAX_PAYLOAD_SIZE 65507
 #define PACKET_BUFF_ELEMENTS 5 //modify this value if buffer should save more packets
 
-static int index1; //keep track of packets being aggregated
+//static int index1; //keep track of packets being aggregated
 
 /*
-    my packet structure which keeps track of the actual packet size for optimal payload printing
+    my packet structure which keeps track of the actual packet size @sizeofpayload for optimal payload printing
+    and the packet itself @packet
 */
 struct my_captured_packet
 {
@@ -5182,8 +5183,6 @@ struct my_captured_packet
     int sizeofpayload;
 
 };
-
-static struct my_captured_packet dp_packet_buff1[PACKET_BUFF_ELEMENTS]; //used to be array of pointers but deaggregation doesn't work
 
 /*
     clean heap buffer created since we cannot use free()
@@ -5246,50 +5245,133 @@ create_custom_packet(struct dp_packet *temp_pkt_for_flow, void *data, size_t siz
     //use the flow to build a new packet with aggregation of packets as it's udp_paylaod
     flow_compose(packetAggr, &flow, data, size_data);
 
-
-
     return packetAggr;
 
 }
+//static struct my_captured_packet dp_packet_buff1[PACKET_BUFF_ELEMENTS]; //used to be array of pointers but deaggregation doesn't work
+
+
+#define FLOWS_TO_HOLD 1000
+#define TIMER_THREAD 5000
+static int index_for_dict = 0;
+static int flows_in_dict = 0;
+//static struct flow_dict my_flow_dict[FLOWS_TO_HOLD] = {{0}}; //pseudo dictionary of FLOWS_TO_HOLD elements initialized to 0
+/*
 static void
-compose_aggrs_action(struct xlate_ctx *ctx, struct ofpact_aggrs *aggrs)
+setTimeout(int milliseconds, bool timerstop)
 {
+    // If milliseconds is less or equal to 0
+    // will be simple return from function without throw error
+    if (milliseconds <= 0)
+    {
+        fprintf(stderr, "Count milliseconds for timeout is less or equal to 0\n");
+        return;
+    }
+
+    // a current time of milliseconds
+    int milliseconds_since = clock() * 1000 / CLOCKS_PER_SEC;
+
+    // needed count milliseconds of return from this timeout
+    int end = milliseconds_since + milliseconds;
+
+    // wait while until needed time comes
+    do
+    {
+        milliseconds_since = clock() * 1000 / CLOCKS_PER_SEC;
+    } while (milliseconds_since <= end);
+    timerstop = true;
+    //insert here code to send packet and do all necessary cleanup stuff
+    //remember to set condition such that
+}
+
+ //function called by client to start a threaded timer
+
+static void
+*threadproc(void *arg)
+{
+    struct args_for_thread *args = arg;
+
+    setTimeout(TIMER_THREAD, args->timerstop);
+}
+struct args_for_thread
+{
+    bool timerstop;
+};
+*/
+struct flow_dict
+{
+    int flow_id;
+    struct my_captured_packet dp_packet_buff1[PACKET_BUFF_ELEMENTS]; //might need to use struct pointer array
+    int index;
+    //struct args_for_thread argsForThread;
+    //pthread_t tid;
+};
+static struct flow_dict my_flow_dict[FLOWS_TO_HOLD] = {{0}};
+/*
+ * returns @flowids the index of the element in our dictionary where the packet buffer for the given
+ * flow identified by @flowid, is contained
+ * else return -1
+ */
+static int
+check_flow_exists(struct flow_dict *fl_dict, int flowid)
+{
+    for(int i = 0; i < FLOWS_TO_HOLD; i++)
+    {
+        //if csum already in array update corresponding payload
+        if(fl_dict[i].flow_id == flowid)
+        {
+            return i;
+        }
+
+    }
+    return -1;
+}
+static void
+compose_aggrs_action(struct xlate_ctx *ctx, struct ofpact_aggrs *aggrs,  struct flow_dict *dict_entry, int flow_entry_index)
+{
+    //c(ctx->odp_actions, OVS_ACTION_ATTR_AGGRS, aggrs->port);
     struct eth_addr fake_mac = ETH_ADDR_C(12,34,56,78,9a,bc); //fake mac to distinguish Packet Aggregate
 
-    if(index1 < 5 && ctx->xin->packet)
+    if(dict_entry->index < 5 && ctx->xin->packet)
     {
-
+        VLOG_ERR("index: %d", dict_entry->index);
         struct dp_packet *packet_to_store = dp_packet_clone(ctx->xin->packet); //clone incoming packet
 
-        dp_packet_buff1[index1].packet = packet_to_store;
-        dp_packet_buff1[index1].sizeofpayload = dp_packet_l4_size(ctx->xin->packet) - UDP_HEADER_LEN;
+        dict_entry->dp_packet_buff1[dict_entry->index].packet = packet_to_store;
+        dict_entry->dp_packet_buff1[dict_entry->index].sizeofpayload = dp_packet_l4_size(ctx->xin->packet) - UDP_HEADER_LEN;
 
         int s = dp_packet_l4_size(ctx->xin->packet) - UDP_HEADER_LEN;
 
-        VLOG_ERR("sending packet  %.*s from host:",s, (char *) dp_packet_get_udp_payload(dp_packet_buff1[index1].packet)); //print payload taking into account its size otherwise weird overlap occurs
-        index1++;
+        VLOG_ERR("preparing packet  %.*s:",s, (char *) dp_packet_get_udp_payload(dict_entry->dp_packet_buff1[dict_entry->index].packet)); //print payload taking into account its size otherwise weird overlap occurs
+        dict_entry->index++;
 
     }
-    if(index1 == 5 && ctx->xin->packet)
+    if(dict_entry->index == 5 && ctx->xin->packet)
     {
-
-        index1 = 0;
+        VLOG_ERR(" buffer is now full index: %d", dict_entry->index);
+        dict_entry->index = 0; // ACTUALLY REMOVE PLACE IN ARRAY
 
         /* create aggregation of packets to send */
-        struct dp_packet *packetAggr = create_custom_packet(dp_packet_buff1[0].packet, dp_packet_buff1, sizeof dp_packet_buff1);
+        struct dp_packet *packetAggr = create_custom_packet(dict_entry->dp_packet_buff1[0].packet, dict_entry->dp_packet_buff1, sizeof dict_entry->dp_packet_buff1);
 
         /* modify headers here if needed, remember to add parameters to this function */
         //not sure if match on dl_src or dst works, POSSIBLE BUG HERE nothing too serious
         struct eth_header *eth_hdrforAggr = dp_packet_eth(packetAggr);
         eth_hdrforAggr->eth_src = fake_mac;
-
-        VLOG_ERR("Sending packet aggregation..");
+        VLOG_ERR("Sending packet aggregation...");
         int err_send = send_pkt_to_port(u16_to_ofp(aggrs->port), ctx, packetAggr);
 
         if(err_send == 0) VLOG_ERR("Packet aggregation sent correctly!");
         else VLOG_ERR("Error in packet aggregation delivery %d", err_send);
 
-        clear_packetBuff(dp_packet_buff1);
+        VLOG_ERR("deleting buffer, zeroing flow_id and index of flow %d:", my_flow_dict[index_for_dict].flow_id);
+
+        clear_packetBuff(dict_entry->dp_packet_buff1);
+        dict_entry->flow_id = 0;
+        index_for_dict =  flow_entry_index;
+        flows_in_dict--;
+        //my_flow_dict[index_for_dict].index = 0; //superfluo, il controllo se e` libero e` su flow_id
+
 
     }
 
@@ -5374,10 +5456,11 @@ struct csum_to_payload
 /* scans our pseudo-dictionary @ctp to see if csum contianed by @spkt is already present in it
  * return index position @csum_i if present
  * else -1 */
+#define PACKETS_TO_HOLD 1000
 static int
 check_csum_exists(struct csum_to_payload *ctp, struct my_split_packet spkt)
 {
-    for(int csum_i=0; csum_i < 100; csum_i++)
+    for(int csum_i=0; csum_i < PACKETS_TO_HOLD; csum_i++)
     {
         //if csum already in array update corresponding payload
         if(ctp[csum_i].csumkey == spkt.udp_csum)
@@ -5438,7 +5521,6 @@ generate_rand_split_array(struct dp_packet *packet_to_split)
 
 
 }
-#define PACKETS_TO_HOLD 1000
 
 static int i_removed = 0; //index to check for empty slot in pseudo-dictionary
 static struct csum_to_payload hold_to_rebuild[PACKETS_TO_HOLD] = {{0}}; //pseudo dictionary of 100 elements initialized to 0
@@ -5466,8 +5548,8 @@ compose_split(struct xlate_ctx *ctx)
 
 
             int prev = 0;
-            int sequence = 0; // BUG??? DOVREI CONTROLLARE IL CHECKSUM PRIMA DI INCREMENTARE IL SEQUENCE NUMBER??? no ogni pacchetto e` scomposto singolarmente
-
+            int sequence = 0; // MEGA BUG??? DOVREI CONTROLLARE IL CHECKSUM PRIMA DI INCREMENTARE IL SEQUENCE NUMBER???
+            // altrimenti pacchetti diversi ricevono numero di sequenza a prescindere se il precedente fa parte della stessa "famiglia"
             for(int i = 0; i < countsplits; i++)
             {
                 VLOG_ERR("split_arr[i] %d", split_arr[i]); //the length of split i
@@ -5502,6 +5584,7 @@ compose_split(struct xlate_ctx *ctx)
                 send, port is chosen randomly on the assumption that if port x exists then all ports < x exist as well
                 remember to remove port that links with original sending host, stuff below works but includes it, so for now,
                 in_port is somewhere in ctx probably
+                 look into sflow_n_outputs
                 just send to maxport i.e. 2
                 int randport = rand() % maxport;
                 ofp_port_t out_port = (randport > 0) ? randport : 1;
@@ -5577,7 +5660,7 @@ compose_split(struct xlate_ctx *ctx)
                 VLOG_ERR("new packet with never before seen checksum");
                 while(hold_to_rebuild[i_removed].csumkey != 0 && i_removed < PACKETS_TO_HOLD)
                 {
-                    VLOG_ERR("looking for first available space in array ");
+                    VLOG_ERR("looking for first available space in dictionary of splits ");
                     i_removed++;
                 }
                 if(i_removed >= PACKETS_TO_HOLD)
@@ -5775,7 +5858,7 @@ xlate_bundle_action(struct xlate_ctx *ctx,
 static void
 xlate_learn_action(struct xlate_ctx *ctx, const struct ofpact_learn *learn)
 {
-    learn_mask(learn, ctx->wc);
+    learn_mask(learn, ctx->wc); //bitwise or between learn and wildcard
 
     if (ctx->xin->xcache || ctx->xin->allow_side_effects) {
         uint64_t ofpacts_stub[1024 / 8];
@@ -7453,7 +7536,51 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
             case OFPACT_AGGRS:
             {
                 ctx->xout->slow |= SLOW_ACTION;
-                compose_aggrs_action(ctx,ofpact_get_AGGRS(a));
+                //VLOG_ERR("table id: %"PRIu8, ctx->table_id);
+                //VLOG_ERR("is internal %d" , rule_dpif_is_internal(ctx->rule));
+                struct ofpact_aggrs *aggrs = ofpact_get_AGGRS(a);
+
+                int fl_entry_index = check_flow_exists(my_flow_dict, aggrs->flowid);
+                VLOG_ERR("flowid: %d exists at dict index: %d", aggrs->flowid, fl_entry_index);
+                if(fl_entry_index >=0 )
+                {
+                    VLOG_ERR("flow with id %d already present in dictionary...\n"
+                             "adding packet there", aggrs->flowid);
+
+                    compose_aggrs_action(ctx, aggrs, &my_flow_dict[fl_entry_index], fl_entry_index);
+                }
+                if(fl_entry_index == -1 && flows_in_dict < FLOWS_TO_HOLD)
+                {
+                    VLOG_ERR("new flow that requires aggragation found with flowid: %d"
+                             "creating entry in dictionary...", aggrs->flowid);
+                    while(my_flow_dict[index_for_dict].flow_id !=0 && index_for_dict < FLOWS_TO_HOLD )
+                    {
+                        VLOG_ERR("looking for first available space in dictionary of flows ...");
+                        index_for_dict++;
+                    }
+                    if(index_for_dict >= FLOWS_TO_HOLD)
+                    {
+                        VLOG_ERR("dictionary of flows full of FLOWS_TO_HOLD number of flows already...\n"
+                                 "maybe consider splitting instead");
+                    }
+                    else
+                    {
+                        VLOG_ERR("placing first packet in the array at dict index: %d", index_for_dict);
+                        my_flow_dict[index_for_dict].flow_id = aggrs->flowid;
+                        //hold_to_rebuild[i_removed].to_reassemble = malloc(s_pkt.tot_splits * sizeof(struct my_split_packet));
+                        my_flow_dict[index_for_dict].index = 0;
+                        flows_in_dict++;
+                        compose_aggrs_action(ctx, aggrs, &my_flow_dict[index_for_dict], index_for_dict);
+
+                        /*
+                         * my_flow_dict[index_for_dict].argsForThread.timerstop = false;
+                         * pthread_create(&my_flow_dict[index_for_dict].tid, NULL, threadproc,  (void *)&my_flow_dict[index_for_dict].argsForThread);
+                        */
+                    }
+
+
+                }
+
                 break;
             }
             case OFPACT_DEAGGR:
