@@ -5281,7 +5281,7 @@ setTimeout(int milliseconds, bool timerstop)
     } while (milliseconds_since <= end);
     timerstop = true;
     //insert here code to send packet and do all necessary cleanup stuff
-    //remember to set condition such that
+    //remember to set condition such that if buffer fills before timer this stops
 }
 
  //function called by client to start a threaded timer
@@ -5303,9 +5303,11 @@ struct flow_dict
     int flow_id;
     struct my_captured_packet dp_packet_buff1[PACKET_BUFF_ELEMENTS]; //might need to use struct pointer array
     int index;
+
     //struct args_for_thread argsForThread;
     //pthread_t tid;
 };
+
 static struct flow_dict my_flow_dict[FLOWS_TO_HOLD] = {{0}};
 /*
  * returns @flowids the index of the element in our dictionary where the packet buffer for the given
