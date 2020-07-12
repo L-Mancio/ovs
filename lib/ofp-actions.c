@@ -7758,11 +7758,16 @@ parse_AGGRS(char *arg, const struct ofpact_parse_params *pp) //
     struct ofpact_aggrs *aggrs;
     aggrs =  ofpact_put_AGGRS(pp->ofpacts);
     error = str_to_u16(&arg[0], "port_for_aggr", &port); //
-    error2 = str_to_u16(&arg[2], "flowid", &fl_id);
+    error2 = str_to_u16(&arg[2], "flowid", &fl_id); //error2 =
     aggrs->port = port;
     aggrs->flowid = fl_id;
     arg[2] = '\0';
-    VLOG_ERR("error2: %s", error2);
+    if(error2)
+    {
+        VLOG_ERR(" "); //does aboslutely nothing just removes stupid prints
+    }
+
+    //VLOG_ERR("error2: %s", error2);
     return error;
 
 }
