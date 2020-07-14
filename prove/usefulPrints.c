@@ -22,3 +22,107 @@ for(int j=0; j<PACKET_BUFF_ELEMENTS; j++)
 VLOG_ERR("structure of packet before change: %s ", ofp_dp_packet_to_string(packetAggr));
 
 VLOG_ERR("is packet that i already sent still here %s", ofp_dp_packet_to_string(hold_to_rebuild[i_csum].to_reassemble->packet));
+
+/*
+struct ofp_aggrs_output {
+    ovs_be32 port;
+    ovs_be16 fl_id;
+
+};
+OFP_ASSERT(sizeof(struct ofp_aggrs_output) == 8);
+*/
+static void
+encode_AGGRS(const struct ofpact_aggrs *aggrs,
+             enum ofp_version ofp_version OVS_UNUSED,
+             struct ofpbuf *out )
+{
+
+    VLOG_ERR("sizeof ofpact %ld: ", sizeof(struct ofp_aggrs_output));
+    printf("some aggr encoding stuff \n");
+    struct ofp_aggrs_output *o_aggrs;
+    o_aggrs = put_OFPAT_AGGRS(out);
+    o_aggrs->port = htons(aggrs->port);
+    o_aggrs->fl_id = htons(aggrs->flowid);
+    printf("finished aggr encoding stuff \n");
+
+
+}
+static enum ofperr
+decode_OFPAT_RAW_AGGRS(const struct ofp_aggrs_output *o_aggrs,
+                       enum ofp_version ofp_version OVS_UNUSED, // //uint16_t p, int fl,
+                       struct ofpbuf *out)
+{
+    //OFPAT_RAW_AGGRS generates an abstract action.
+    struct ofpact_aggrs *aggrs;
+
+    aggrs = ofpact_put_AGGRS(out);
+    aggrs->port = ntohs(o_aggrs->port);
+    aggrs->flowid = ntohs(o_aggrs->fl_id);
+
+    return 0;
+}
+//helper for below
+/*
+static char * OVS_WARN_UNUSED_RESULT
+parse_aggrs(char *arg, struct ofpbuf *ofpacts)
+{
+
+    struct ofpact_aggrs *aggrs;
+    uint16_t port;
+    int fl = 0;
+    char *error;
+    //char *errorfl;
+    char *name = "error";
+    //int errorint = 999999;
+    error = str_to_u16(arg, name, &port);
+    if (error) return error;
+    //some error for parameter flowid, don't know how to set this tbh
+    //errorfl = str_to_int(arg, errorint, &fl);
+    //if (errorfl) return error;
+
+    aggrs = ofpact_put_AGGRS(ofpacts);
+    aggrs->port = port;
+    aggrs->flowid = fl;
+    return NULL;
+
+}
+ */
+static char * OVS_WARN_UNUSED_RESULT
+parse_AGGRS(char *arg, const struct ofpact_parse_params *pp OVS_UNUSED) //
+{
+
+    VLOG_ERR("esiste la virgola %p", strstr(arg,","));
+    uint16_t port;
+
+    char *error;
+    printf("arg from parse_AGGRS, should contain port and id: %s %s %s \n", &arg[0], &arg[1], &arg[2]);
+    struct ofpact_aggrs *aggrs;
+    aggrs =  ofpact_put_AGGRS(pp->ofpacts);
+    error = str_to_u16(&arg[0], "port_for_aggr", &port);
+    aggrs->port = port;
+    aggrs->flowid = atoi(&arg[2]);
+
+
+
+    //str_to_u16
+    //ofpact_put_AGGRS(pp->ofpacts);
+    //struct ofpact_aggrs *ofpactaggrs;
+    //ofpactaggrs = ofpact_put_AGGRS(pp->ofpacts);
+    return error;//parse_aggrs(arg, pp->ofpacts);
+
+}
+static void
+format_AGGRS(const struct ofpact_aggrs *aggrs,
+             const struct ofpact_format_params *fp)
+{
+    printf("some aggr formatting stuff \n");
+    //ds_put_format(fp->s , "%saggrs%s", colors.value, colors.end);
+    ds_put_format(fp->s, "aggrs:%"PRIu16 ",flowid:%d", aggrs->port, aggrs->flowid);
+}
+static enum ofperr
+check_AGGRS(const struct ofpact_aggrs *aggrs OVS_UNUSED,
+            const struct ofpact_check_params *cp OVS_UNUSED)
+{
+    //return ofpact_check_output_port(aggrs->port, cp->max_ports);
+    return 0;
+}
