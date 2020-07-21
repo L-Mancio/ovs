@@ -7769,16 +7769,16 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
             struct ofpact_aggrs *aggrs = ofpact_get_AGGRS(a);
 
             int fl_entry_index = check_flow_exists(my_flow_dict, aggrs->flowid);
-            if(fl_entry_index >=0 )
+            if(fl_entry_index >=0 && ctx->xin->packet) //aggiunto "ctx->xin->packet" per problemi con ryu ctx->xin->packet
             {
                 VLOG_ERR("flow with id %d already present in dictionary at index: %d...\n"
                          "adding packet there", aggrs->flowid, fl_entry_index);
 
                 compose_aggrs_action(ctx, aggrs, &my_flow_dict[fl_entry_index], fl_entry_index);
             }
-            if(fl_entry_index == -1 && flows_in_dict < FLOWS_TO_HOLD)
+            if(fl_entry_index == -1 && flows_in_dict < FLOWS_TO_HOLD && ctx->xin->packet) //aggiunto "ctx->xin->packet" per problemi con ryu ctx->xin->packet
             {
-                VLOG_ERR("new flow that requires aggragation found with flowid: %d"
+                VLOG_ERR("new flow that requires aggregation found with flowid: %d"
                          "creating entry in dictionary...", aggrs->flowid);
                 while(my_flow_dict[index_for_dict].flow_id !=0 && index_for_dict < FLOWS_TO_HOLD )
                 {
