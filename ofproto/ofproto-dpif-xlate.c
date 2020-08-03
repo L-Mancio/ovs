@@ -70,6 +70,11 @@
 #include "lib/ofp-print.c"
 #include "lib/flow.c"
 #include <signal.h>
+#include "lib/conntrack-private.h"
+#include "lib/conntrack-tcp.c"
+
+//#include "lib/socket-util.c"
+//#include "lib/conntrack.c"
 COVERAGE_DEFINE(xlate_actions);
 COVERAGE_DEFINE(xlate_actions_oversize);
 COVERAGE_DEFINE(xlate_actions_too_many_output);
@@ -5261,11 +5266,15 @@ xlate_output_action(struct xlate_ctx *ctx, ofp_port_t port,
         ctx->nf_output_iface = NF_OUT_MULTI;
     }
 }
-#define PACKET_BUFF_ELEMENTS 5 //each dp_packet buffer contains this amount of packets, just modify this all should work fine
+#define PACKET_BUFF_ELEMENTS 4 //each dp_packet buffer contains this amount of packets, just modify this all should work fine
 #define FLOWS_TO_HOLD 1000 //pseudo-dictionary for aggregation, since we need flow_id to distinguish which flow we're working on , honestly 1000 flows is overkill
-#define TIMER_THREAD 8000 //amount of milliseconds we want the timer for each thread, started after first flow for aggregation is received, to last (e.g 8 seconds-->8000)
+#define TIMER_THREAD 2000 //amount of milliseconds we want the timer for each thread, started after first flow for aggregation is received, to last (e.g 8 seconds-->8000)
+#define TIMER_THREAD_TCP 3500
 static int index_for_dict = 0; //this value is used to iterate over our pseudo dictionary
 static int flows_in_dict = 0; //this value is used to check how many flow_ids are stored at a given time
+
+static int index_for_dict_tcp = 0; //this value is used to iterate over our pseudo dictionary
+static int flows_in_dict_tcp = 0; //this value is used to check how many flow_ids are stored at a given time
 
 
 /*
@@ -5276,6 +5285,13 @@ struct my_captured_packet
 {
     struct dp_packet *packet;
     int sizeofpayload;
+
+
+};
+struct my_captured_packet_tcp
+{
+    struct dp_packet *packet;
+    uint32_t sizeoftcppayload;
 
 };
 /*
@@ -5300,6 +5316,15 @@ struct args_for_thread
     struct ofpact_aggrs *aggrs; //needed for port in case aggregate is sent from thread
     struct ofproto_dpif *ofproto;
 };
+struct args_for_thread_tcp
+{
+    bool timerstop;
+    //reference to dictionary needed in order to clean up after sending packet aggr
+    struct flow_dict_tcp *dict_entry;
+    int flow_entry_index;
+    struct ofpact_aggrs *aggrs; //needed for port in case aggregate is sent from thread
+    struct ofproto_dpif *ofproto;
+};
 /*
  * flow_dict is the pseudo-dictionary structure needed to store aggregation flows from each switch and their corresponding packet buffers. This solution was adopted
  * since ovs doesn't create a new thread for each flow action.
@@ -5314,8 +5339,15 @@ struct flow_dict
     int flow_id;
     struct my_captured_packet dp_packet_buff1[PACKET_BUFF_ELEMENTS]; //= {{0}}; //initialized to 0 so can check for all packets when buffer isn't full
     int index;
-    //bool buffer_full;
     struct args_for_thread argsForThread;
+    pthread_t tid;
+};
+struct flow_dict_tcp
+{
+    int flow_id;
+    struct my_captured_packet_tcp dp_packet_buff1[PACKET_BUFF_ELEMENTS]; //= {{0}}; //initialized to 0 so can check for all packets when buffer isn't full
+    int index;
+    struct args_for_thread_tcp argsForThread;
     pthread_t tid;
 };
 
@@ -5325,19 +5357,35 @@ struct flow_dict
 static void
 clear_packetBuff(struct my_captured_packet buff_tobe_cleaned[])
 {
+    /*
+    for(size_t i=0; i < PACKET_BUFF_ELEMENTS; i++)
+    {
+        buff_tobe_cleaned[i].packet = 0;
+        buff_tobe_cleaned[i].sizeofpayload = 0;
+    }*/
     memset(buff_tobe_cleaned, 0, PACKET_BUFF_ELEMENTS * sizeof(struct my_captured_packet));
+}
+static void
+clear_packetBuff_tcp(struct my_captured_packet_tcp *buff_tobe_cleaned)
+{
+    /*for(size_t i=0; i < PACKET_BUFF_ELEMENTS; i++)
+    {
+        buff_tobe_cleaned[i].packet = 0;
+        buff_tobe_cleaned[i].sizeoftcppayload = 0;
+    }*/
+    memset(buff_tobe_cleaned, 0, PACKET_BUFF_ELEMENTS * sizeof(struct my_captured_packet_tcp));
 }
 
 /*
  * resubmit @packet_to_resubmit to flow table using info from current switch and the native resubmit action
  */
 static int
-resubmit_to_table(struct xlate_ctx *ctx, struct dp_packet *packet_to_resubmit) //struct flow *flow
+resubmit_to_table(struct xlate_ctx *ctx, struct dp_packet *packet_to_resubmit)
 {
     struct flow flow;
 
     //setting flow to reflect that of the packet to resubmit
-    flow_extract(packet_to_resubmit,&flow);
+    flow_extract(packet_to_resubmit, &flow);
 
     ovs_version_t version = ofproto_dpif_get_tables_version(ctx->xin->ofproto);
     struct ofpact_resubmit res;
@@ -5354,7 +5402,9 @@ resubmit_to_table(struct xlate_ctx *ctx, struct dp_packet *packet_to_resubmit) /
                                            &res.ofpact, sizeof res,
                                            0, 0, packet_to_resubmit);
 
+
 }
+
 
 /*
  * send @packet_to_send through @outport of switch, who's info is retrieved through @ofproto
@@ -5389,10 +5439,6 @@ create_custom_packet(struct dp_packet *temp_pkt_for_flow, void *data, size_t siz
     return packetAggr;
 
 }
-
-
-
-
 
 
 /*
@@ -5439,27 +5485,97 @@ static void
     setTimeout(TIMER_THREAD);
     args->timerstop = true;
 
+    if(args->dict_entry->dp_packet_buff1[0].packet != 0 || args->dict_entry->dp_packet_buff1[0].packet != NULL) //overkill but needed
+    {
+        struct eth_addr fake_mac = ETH_ADDR_C(12, 34, 56, 78, 9a, bc); //fake mac to distinguish Packet Aggregate
+        //do stuff as if buffer were full
+        struct dp_packet *packetAggr = create_custom_packet(args->dict_entry->dp_packet_buff1[0].packet,
+                                                            args->dict_entry->dp_packet_buff1,
+                                                            sizeof args->dict_entry->dp_packet_buff1);
 
-    struct eth_addr fake_mac = ETH_ADDR_C(12,34,56,78,9a,bc); //fake mac to distinguish Packet Aggregate
-    //do stuff as if buffer were full
-    struct dp_packet *packetAggr = create_custom_packet(args->dict_entry->dp_packet_buff1[0].packet, args->dict_entry->dp_packet_buff1, sizeof args->dict_entry->dp_packet_buff1);
+        /* modify headers here if needed, remember to add parameters to this function */
+        //not sure if match on dl_src or dst works, POSSIBLE BUG HERE nothing too serious
+        struct eth_header *eth_hdrforAggr = dp_packet_eth(packetAggr);
+        eth_hdrforAggr->eth_src = fake_mac;
+        eth_hdrforAggr->eth_dst = fake_mac;
 
-    /* modify headers here if needed, remember to add parameters to this function */
-    //not sure if match on dl_src or dst works, POSSIBLE BUG HERE nothing too serious
-    struct eth_header *eth_hdrforAggr = dp_packet_eth(packetAggr);
-    eth_hdrforAggr->eth_src = fake_mac;
+        struct ip_header *iph = dp_packet_l3(packetAggr);
+        char *strip = "99.99.99.99";
+        ovs_be32 ip;
+        ip_parse(strip, &ip);
+        ovs_16aligned_be32 netip;
+        put_16aligned_be32(&netip, ip);
+        iph->ip_dst = netip;
+        //VLOG_ERR("Thread is sending packet aggregation...");
 
-    VLOG_ERR("Sending packet aggregation...");
+        int err_send = send_pkt_to_port(u16_to_ofp(args->aggrs->port), args->ofproto, packetAggr);
+        if (err_send == 0) VLOG_ERR("Packet aggregation sent correctly by Thread!");
+        else VLOG_ERR("Error in packet aggregation delivery %d", err_send);
 
-    int err_send = send_pkt_to_port(u16_to_ofp(args->aggrs->port), args->ofproto, packetAggr);
-    if(err_send == 0) VLOG_ERR("Packet aggregation sent correctly!");
-    else VLOG_ERR("Error in packet aggregation delivery %d", err_send);
+        /* dictionary cleanup */
+        clear_packetBuff(args->dict_entry->dp_packet_buff1);
+        args->dict_entry->flow_id = 0;
+        index_for_dict = args->flow_entry_index;
+        flows_in_dict--;
 
-    /* dictionary cleanup */
-    clear_packetBuff(args->dict_entry->dp_packet_buff1);
-    args->dict_entry->flow_id = 0;
-    index_for_dict =  args->flow_entry_index;
-    flows_in_dict--;
+         //or pthread_exit(args->dict_entry->tid);
+    }
+    else
+    {
+        VLOG_ERR("udp timer stopped nothing sent buffer was empty");
+    }
+    return 0;
+
+}
+static void
+*threadproc_tcp(void *arg)
+{
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL); //make this thread cancellable from main or another thread
+    sleep(0);
+    struct args_for_thread_tcp *args = arg;
+
+    setTimeout(TIMER_THREAD_TCP);
+    args->timerstop = true;
+
+    if(args->dict_entry->dp_packet_buff1[0].packet != 0 || args->dict_entry->dp_packet_buff1[0].packet != NULL)
+    {
+        struct eth_addr fake_mac = ETH_ADDR_C(12,34,56,78,9a,bc); //fake mac to distinguish Packet Aggregate
+        //do stuff as if buffer were full
+        struct dp_packet *packetAggr = create_custom_packet(args->dict_entry->dp_packet_buff1[0].packet, args->dict_entry->dp_packet_buff1, sizeof args->dict_entry->dp_packet_buff1);
+
+        /* modify headers here if needed, remember to add parameters to this function */
+        //not sure if match on dl_src or dst works, POSSIBLE BUG HERE nothing too serious
+        struct eth_header *eth_hdrforAggr = dp_packet_eth(packetAggr);
+        eth_hdrforAggr->eth_src = fake_mac;
+        eth_hdrforAggr->eth_dst = fake_mac; //just added
+
+        struct ip_header *iph = dp_packet_l3(packetAggr);
+        char *strip = "99.99.99.99";
+        ovs_be32 ip;
+        ip_parse(strip, &ip);
+        ovs_16aligned_be32 netip;
+        put_16aligned_be32(&netip, ip);
+        iph->ip_dst = netip;
+
+        //VLOG_ERR("structure of TCP AGGR packet before sending: %s ", ofp_dp_packet_to_string(packetAggr));
+        //VLOG_ERR("Thread is sending TCP packet aggregation...");
+
+        int err_send = send_pkt_to_port(u16_to_ofp(args->aggrs->port), args->ofproto, packetAggr);
+        if(err_send == 0) VLOG_ERR("TCP Packet aggregation sent correctly by Thread!");
+        else VLOG_ERR("Error in TCP packet aggregation delivery %d", err_send);
+
+        /* dictionary cleanup */
+        clear_packetBuff_tcp(args->dict_entry->dp_packet_buff1);
+
+        args->dict_entry->flow_id = 0;
+        index_for_dict_tcp =  args->flow_entry_index;
+        flows_in_dict_tcp--;
+    }
+    else
+    {
+        VLOG_ERR("tcp timer stopped nothing sent buffer was empty");
+    }
+
 
     return 0; //or pthread_exit(args->dict_entry->tid);
 
@@ -5485,8 +5601,23 @@ check_flow_exists(struct flow_dict *fl_dict, int flowid)
     }
     return -1;
 }
+static int
+check_flow_exists_tcp(struct flow_dict_tcp *fl_dict, int flowid)
+{
+    for(int i = 0; i < FLOWS_TO_HOLD; i++)
+    {
+        //if csum already in array update corresponding payload
+        if(fl_dict[i].flow_id == flowid)
+        {
+            return i;
+        }
+
+    }
+    return -1;
+}
 /* This is a pseudo-dictionary, it has flow_ids as keys and buffers of my_captured_packet as the value along with other useful info explained in the struct definition */
 static struct flow_dict my_flow_dict[FLOWS_TO_HOLD] = {{0}};
+static struct flow_dict_tcp my_flow_dict_tcp[FLOWS_TO_HOLD] = {{0}};
 /*
  * function called by each aggregation flow to create and eventually send the aggregation of packets created
  * @ctx structure containing incoming packet as well as A LOT of other information
@@ -5496,7 +5627,7 @@ static struct flow_dict my_flow_dict[FLOWS_TO_HOLD] = {{0}};
  *                   the index for the next flow to be placed on is set to this value
  */
 static void
-compose_aggrs_action(struct xlate_ctx *ctx, struct ofpact_aggrs *aggrs,  struct flow_dict *dict_entry, int flow_entry_index)
+compose_aggrs_action(struct xlate_ctx *ctx, struct dp_packet *packet_to_store,struct ofpact_aggrs *aggrs,  struct flow_dict *dict_entry, int flow_entry_index)
 {
     //c(ctx->odp_actions, OVS_ACTION_ATTR_AGGRS, aggrs->port);
     struct eth_addr fake_mac = ETH_ADDR_C(12,34,56,78,9a,bc); //fake mac to distinguish Packet Aggregate
@@ -5504,14 +5635,14 @@ compose_aggrs_action(struct xlate_ctx *ctx, struct ofpact_aggrs *aggrs,  struct 
     if(dict_entry->index < PACKET_BUFF_ELEMENTS && dict_entry->argsForThread.timerstop == false && ctx->xin->packet)
     {
         VLOG_ERR("index: %d", dict_entry->index);
-        struct dp_packet *packet_to_store = dp_packet_clone(ctx->xin->packet); //clone incoming packet
+        //struct dp_packet *packet_to_store = dp_packet_clone(ctx->xin->packet); //clone incoming packet
 
         dict_entry->dp_packet_buff1[dict_entry->index].packet = packet_to_store;
         dict_entry->dp_packet_buff1[dict_entry->index].sizeofpayload = dp_packet_l4_size(ctx->xin->packet) - UDP_HEADER_LEN;
 
-        int s = dp_packet_l4_size(ctx->xin->packet) - UDP_HEADER_LEN;
+        //int s = dp_packet_l4_size(ctx->xin->packet) - UDP_HEADER_LEN;
 
-        VLOG_ERR("preparing packet:  %.*s",s, (char *) dp_packet_get_udp_payload(dict_entry->dp_packet_buff1[dict_entry->index].packet)); //print payload taking into account its size otherwise weird overlap occurs
+        //VLOG_ERR("preparing packet:  %.*s",s, (char *) dp_packet_get_udp_payload(dict_entry->dp_packet_buff1[dict_entry->index].packet)); //print payload taking into account its size otherwise weird overlap occurs
         dict_entry->index++;
 
     }
@@ -5527,21 +5658,90 @@ compose_aggrs_action(struct xlate_ctx *ctx, struct ofpact_aggrs *aggrs,  struct 
         struct dp_packet *packetAggr = create_custom_packet(dict_entry->dp_packet_buff1[0].packet, dict_entry->dp_packet_buff1, sizeof dict_entry->dp_packet_buff1);
 
         /* modify headers here if needed, remember to add parameters to this function */
-        //not sure if match on dl_src or dst works, POSSIBLE BUG HERE nothing too serious
         struct eth_header *eth_hdrforAggr = dp_packet_eth(packetAggr);
         eth_hdrforAggr->eth_src = fake_mac;
-        VLOG_ERR("Sending packet aggregation...");
+        eth_hdrforAggr->eth_dst = fake_mac;
+
+        struct ip_header *iph = dp_packet_l3(packetAggr);
+        char *strip = "99.99.99.99";
+        ovs_be32 ip;
+        ip_parse(strip, &ip);
+        ovs_16aligned_be32 netip;
+        put_16aligned_be32(&netip, ip);
+        iph->ip_dst = netip;
+        //VLOG_ERR("Sending packet aggregation...");
         int err_send = send_pkt_to_port(u16_to_ofp(aggrs->port), ctx->xin->ofproto, packetAggr);
 
-        if(err_send == 0) VLOG_ERR("Packet aggregation sent correctly!");
+        if(err_send == 0) VLOG_ERR("Packet aggregation sent correctly since buffer reached full capacity!");
         else VLOG_ERR("Error in packet aggregation delivery %d", err_send);
 
-        VLOG_ERR("deleting buffer, zeroing flow_id and index of flow %d:", my_flow_dict[index_for_dict].flow_id);
+        //VLOG_ERR("deleting buffer, zeroing flow_id and index of flow %d:", my_flow_dict[index_for_dict].flow_id);
 
         clear_packetBuff(dict_entry->dp_packet_buff1);
         dict_entry->flow_id = 0;
         index_for_dict =  flow_entry_index;
         flows_in_dict--;
+
+
+    }
+
+}
+
+static void
+compose_aggrs_action_tcp(struct xlate_ctx *ctx,struct dp_packet *packet_to_store, struct ofpact_aggrs *aggrs,  struct flow_dict_tcp *dict_entry, int flow_entry_index)
+{
+
+    struct eth_addr fake_mac = ETH_ADDR_C(12,34,56,78,9a,bc); //fake mac to distinguish Packet Aggregate
+
+    if(dict_entry->index < PACKET_BUFF_ELEMENTS && dict_entry->argsForThread.timerstop == false)
+    {
+        VLOG_ERR("index: %d", dict_entry->index);
+        //struct dp_packet *packet_to_store = dp_packet_clone(ctx->xin->packet); //clone incoming packet
+        VLOG_ERR("structure of packet before change: %s ",  ofp_dp_packet_to_string(packet_to_store));
+        dict_entry->dp_packet_buff1[dict_entry->index].packet = packet_to_store;
+        dict_entry->dp_packet_buff1[dict_entry->index].sizeoftcppayload = tcp_payload_length(packet_to_store);
+
+        dict_entry->index++;
+    }
+    if(dict_entry->index == PACKET_BUFF_ELEMENTS && dict_entry->argsForThread.timerstop == false)
+    {
+        /*we don't need the thread anymore since buffer is full and ready to be sent, remove thread */
+        int err_thread = pthread_cancel(dict_entry->tid); //stop timer thread as it is not needed
+        VLOG_ERR("cancelled timer thread with errno: %d", err_thread);
+
+        dict_entry->index = 0; // ACTUALLY REMOVE PLACE IN ARRAY, don't think it's needed since check is done on flow id
+
+        /* create aggregation of packets to send */
+        struct dp_packet *packetAggr = create_custom_packet(dict_entry->dp_packet_buff1[0].packet, dict_entry->dp_packet_buff1, sizeof(dict_entry->dp_packet_buff1));
+
+        /* modify headers here if needed, remember to add parameters to this function */
+        //not sure if match on dl_src or dst works, POSSIBLE BUG HERE nothing too serious
+        struct eth_header *eth_hdrforAggr = dp_packet_eth(packetAggr);
+        eth_hdrforAggr->eth_src = fake_mac;
+        eth_hdrforAggr->eth_dst = fake_mac;
+        struct ip_header *iph = dp_packet_l3(packetAggr);
+        char *strip = "99.99.99.99";
+        ovs_be32 ip;
+        ip_parse(strip, &ip);
+        ovs_16aligned_be32 netip;
+        put_16aligned_be32(&netip, ip);
+        iph->ip_dst = netip;
+
+        //VLOG_ERR("Sending TCP packet aggregation...");
+        int err_send = send_pkt_to_port(u16_to_ofp(aggrs->port), ctx->xin->ofproto, packetAggr);
+        //VLOG_ERR("structure of TCP AGGR packet before sending: %s ", ofp_dp_packet_to_string(packetAggr));
+        if(err_send == 0) VLOG_ERR("TCP Packet aggregation sent correctly since buffer reached full capacity!");
+        else VLOG_ERR("Error in TCP packet aggregation delivery %d", err_send);
+
+        VLOG_ERR("deleting buffer, zeroing flow_id and index of flow %d:", dict_entry->flow_id);
+        //VLOG_ERR("sizeof dp_packet_buff %ld: ", sizeof(dict_entry->dp_packet_buff1));
+        //VLOG_ERR("mysizeof dp_packet_buff %ld: ", PACKET_BUFF_ELEMENTS * sizeof(struct my_captured_packet_tcp));
+
+        clear_packetBuff_tcp(dict_entry->dp_packet_buff1);
+        //free(dict_entry->dp_packet_buff1);
+        dict_entry->flow_id = 0;
+        index_for_dict_tcp =  flow_entry_index;
+        flows_in_dict_tcp--;
 
 
     }
@@ -5558,41 +5758,77 @@ compose_deaggr(struct xlate_ctx *ctx)
 
     if(ctx->xin->packet)
     {
-
         struct eth_header *eth_preDeaggr = dp_packet_eth(ctx->xin->packet); //extract ETH header to check for aggregation dl_src
 
         if(eth_addr_equals(eth_preDeaggr->eth_src, fake_mac))
         {
-            struct dp_packet *packet_to_store_forDeaggr = dp_packet_clone(ctx->xin->packet); //clone incoming packet
-            struct my_captured_packet *checkrecvdAggr = (struct my_captured_packet *) dp_packet_get_udp_payload(packet_to_store_forDeaggr); //extract my_captured_packet array by casting the udp payload
-
-            /* for every packet in the array extract their flow and send it back to the flow table where they will be redirected accordingly */
-            //bool bufferfull = true;
-            //int j = 0;
+            //struct dp_packet *packet_to_store_forDeaggr = dp_packet_clone(ctx->xin->packet); //clone incoming packet
+            struct my_captured_packet *checkrecvdAggr = (struct my_captured_packet *) dp_packet_get_udp_payload(ctx->xin->packet); //extract my_captured_packet array by casting the udp payload
 
 
             for(int j=0; j<PACKET_BUFF_ELEMENTS; j++) //instead of PACKET_BUFF_ELEMENTS just check if packet exists since it was initialized to 0
             {
                 if(checkrecvdAggr[j].packet == 0) //no packet at index j means no packets for sure later send like it is
                 {
-                    //bufferfull = false;
                     break; //do i need this?
-
                 }
                 else
                 {
-                    /* resubmit packet to flow table */
                     int err_resub = resubmit_to_table(ctx,checkrecvdAggr[j].packet);
 
                     if(err_resub  == 0)
                     {
-                        VLOG_ERR("Packet resubmitted to flow table successfully");
+                        VLOG_ERR("Deaggregation...Packet resubmitted to flow table successfully");
                     }
-                    else VLOG_ERR("Error in packet resubmission to flow table %d", err_resub);
+                    else VLOG_ERR("Deaggregation...Error in packet resubmission to flow table %d", err_resub);
 
                 }
 
             }
+        }
+    }
+}
+static void
+compose_deaggr_tcp(struct xlate_ctx *ctx)
+{
+    struct eth_addr fake_mac = ETH_ADDR_C(12,34,56,78,9a,bc);
+
+    if(ctx->xin->packet)
+    {
+        struct eth_header *eth_preDeaggr = dp_packet_eth(ctx->xin->packet); //extract ETH header to check for aggregation dl_src
+
+        if(eth_addr_equals(eth_preDeaggr->eth_src, fake_mac))
+        {
+            //struct dp_packet *packet_to_store_forDeaggr = dp_packet_clone(ctx->xin->packet); //clone incoming packet
+            //struct my_captured_packet_tcp *checkrecvdAggr = (struct my_captured_packet_tcp *) dp_packet_get_tcp_payload(packet_to_store_forDeaggr); //extract my_captured_packet array by casting the udp payload
+            struct my_captured_packet_tcp *checkrecvdAggr = (struct my_captured_packet_tcp *) dp_packet_get_tcp_payload(ctx->xin->packet);
+            /* for every packet in the array extract their flow and send it back to the flow table where they will be redirected accordingly */
+            //bool bufferfull = true;
+            //int j = 0; BREAKPOINT HERE !!!!
+
+            for(int j=0; j<PACKET_BUFF_ELEMENTS; j++) //instead of PACKET_BUFF_ELEMENTS just check if packet exists since it was initialized to 0
+            {
+                if(checkrecvdAggr[j].packet == 0) //no packet at index j means no packets for sure later, stop deaggregating all packets have been sent
+                {
+                    break; //do i need this?
+                }
+                else
+                {
+                    //VLOG_ERR("structure of packet before change: %s ", ofp_dp_packet_to_string(checkrecvdAggr[j].packet));
+
+                    /* resubmit packet to flow table */
+                    int err_resub = resubmit_to_table(ctx, checkrecvdAggr[j].packet);
+
+                    if(err_resub == 0)
+                    {
+                        VLOG_ERR("TCP Deaggregation...Packet resubmitted to flow table successfully");
+                    }
+                    else VLOG_ERR("TCP Deaggregation... Error in packet resubmission to flow table %d", err_resub);
+
+                }
+
+            }
+
         }
     }
 }
@@ -5631,7 +5867,23 @@ struct my_split_packet
 
 
 };
+/*
+ * custom struct to hold a split @packet,
+ * @sequence for the reassembling phase
+ * @sizeofpayload which is the original payload size not of the split
+ * @tot_splits how many other splits to expect before reassembling
+ * @tcp_csum the original packet checksum used to distinguish between different splits of different packets
+ */
+struct my_tcp_split_packet
+{
+    struct dp_packet *packet;
+    int seq;
+    uint32_t sizeofpayload;
+    int tot_splits;
+    ovs_be16 tcp_csum;
 
+
+};
 /*
  * struct used to create a pseudo-dictionary for splitting action,
  * @csumkey as the key, equal to a udp checksum
@@ -5644,7 +5896,18 @@ struct csum_to_payload
     struct my_split_packet *to_reassemble;
     int arrived;
 };
-
+/*
+ * struct used to create a pseudo-dictionary for splitting action,
+ * @csumkey as the key, equal to a udp checksum
+ * @to_reassemble is an array containing all the splits received with the same @csumkey
+ * @arrived is a simple counter used to check if all splits have been received by comparing it to tot_split in my split packet
+ */
+struct tcp_csum_to_payload
+{
+    ovs_be16 csumkey;
+    struct my_tcp_split_packet *to_reassemble;
+    int arrived;
+};
 /* scans our pseudo-dictionary @ctp to see if csum contianed by @spkt is already present in it
  * return index position @csum_i if present
  * else -1 */
@@ -5663,30 +5926,63 @@ check_csum_exists(struct csum_to_payload *ctp, struct my_split_packet spkt)
     }
     return -1;
 }
+static int
+check_tcpcsum_exists(struct tcp_csum_to_payload *ctp, struct my_tcp_split_packet spkt)
+{
+    for(int csum_i=0; csum_i < PACKETS_TO_HOLD; csum_i++)
+    {
+        //if csum already in array update corresponding payload
+        if(ctp[csum_i].csumkey == spkt.tcp_csum)
+        {
+            return csum_i;
+        }
+
+    }
+    return -1;
+}
 /*
  * given array of splits @msp, reassembles the payloads to create the original payload and returns it
  */
 static char *
 reassemble_message(struct my_split_packet *msp)
 {
-    char *temp_payload = malloc(msp[0].sizeofpayload);//[msp[0].sizeofpayload];
-    temp_payload[0] = '\0'; //clear temp payload
+    char *temp_payload = (char*) malloc(sizeof(char) * msp[0].sizeofpayload);//malloc(msp[0].sizeofpayload);//[msp[0].sizeofpayload];
+    //temp_payload[0] = '\0'; //clear temp payload
     for(int i=0; i < msp[0].tot_splits; i++)
     {
         //VLOG_ERR("structure of packet %s ", ofp_dp_packet_to_string(msp[0].packet));
         int size_split = dp_packet_l4_size(msp[i].packet) - UDP_HEADER_LEN;
         strncat(temp_payload, (char *) dp_packet_get_udp_payload(msp[i].packet), (size_t) size_split);
-        temp_payload[size_split] = '\0';
+        //temp_payload[size_split] = '\0';
 
     }
     //temp_payload[msp[0].tot_splits] = '\0';
     VLOG_ERR("sto mandando questo %s ",temp_payload);
     return temp_payload;
 }
+//static char *temp_payload_reass;
+static char *
+reassemble_tcp_message(struct my_tcp_split_packet *msp1)
+{
+    VLOG_ERR("tot splits: %d, sizepayload %"PRIu32, msp1[0].tot_splits, msp1[0].sizeofpayload);
+    char *temp_payload_reass = malloc(sizeof(char) * msp1[0].sizeofpayload);//doesn't matter which index i pick sizepayload is the same for each split of the same packet
+    //temp_payload_reass[0] = '\0'; //clear temp payload
+    for(int i=0; i < msp1[0].tot_splits; i++)
+    {
+        VLOG_ERR("structure of packet %s ", ofp_dp_packet_to_string(msp1[0].packet));
+        uint32_t size_split = tcp_payload_length(msp1[i].packet);//dp_packet_l4_size(msp[i].packet) - UDP_HEADER_LEN;
+        strncat(temp_payload_reass, (char *) dp_packet_get_tcp_payload(msp1[i].packet), (size_t) size_split);
+        //temp_payload_reass[size_split] = '\0';
+    }
+    //temp_payload[msp[0].tot_splits] = '\0';
+    VLOG_ERR("sto mandando questo %s ",temp_payload_reass);
+    return temp_payload_reass;
+}
 
 static int countsplits = 0; //count of total number of splits, varies for each packet since splits are randomic
 /*
- *
+ * splits payload of @packet_to_split into random parts
+ * @returns array of lengths of each split
  */
 static int *
 generate_rand_split_array(struct dp_packet *packet_to_split)
@@ -5717,165 +6013,358 @@ generate_rand_split_array(struct dp_packet *packet_to_split)
 
 
 }
+static int tcpcountsplits = 0; //count of total number of splits, varies for each packet since splits are randomic
+/*
+ * splits payload of @packet_to_split into random parts
+ * @returns array of lengths of each split
+ */
+static uint32_t *
+generate_tcp_rand_split_array(struct dp_packet *packet_to_split)
+{
+    uint32_t rem = tcp_payload_length(packet_to_split); //starts as actual complete payload size, is decreased as splitting occurs
+    uint32_t *split_arr = malloc(rem * sizeof(uint32_t));//this array will contain the random lengths of splits we'll apply to the payload,
+    // since we don't know how many splits we set the length of the array to the size of the payload
+    int indexsplit = 0; //index to iterate over split_arr
+    /* while length of original packet is > 0, keep splitting by a random number from 1 -> rem */
+    while(rem > 0)
+    {
+        unsigned int seed = 0;
+        int splits = rand_r(&seed) % rem;
+
+
+        //causes splits to be 1 many times could be improved, maybe using something more randomic
+        if(splits == 0)
+            splits = 1;
+
+        split_arr[indexsplit] = splits; //fill array of splits
+        VLOG_ERR("splits %d\n", split_arr[indexsplit]); //print this to see if length of splits are correct when printing split packet payloads
+        tcpcountsplits++; //increase counter
+        rem -= splits; //decrease remaining length of splittable payload, so we won't have a split length grater than leftover payload length
+        indexsplit++; //increase index of iteration
+
+    }
+    return split_arr;
+
+
+}
+
+
+static int i_tcpremoved = 0; //index to check for empty slot in pseudo-dictionary
+static struct tcp_csum_to_payload tcp_hold_to_rebuild[PACKETS_TO_HOLD] = {{0}}; //PACKETS_TO_HOLD
+//static char *reass_payload;
+static void
+compose_split_tcp(struct xlate_ctx *ctx)
+{
+    struct eth_addr fake_mac = ETH_ADDR_C(44,34,56,78,9a,bc);
+    struct eth_header *eth_pre_split = dp_packet_eth(ctx->xin->packet); //take ethernet header of incoming packet
+    //free(temp_payload_reass);
+    if(!eth_addr_equals(eth_pre_split->eth_src, fake_mac))
+    {
+        struct dp_packet *packet_to_split = dp_packet_clone(ctx->xin->packet); //clone incoming packet
+
+        char *complete_payload = (char *) dp_packet_get_tcp_payload(packet_to_split);
+        uint32_t truepayloadsize =  tcp_payload_length(packet_to_split);
+
+        VLOG_ERR("incoming packet w/payload size %u to split: %.*s", truepayloadsize, truepayloadsize, complete_payload);
+
+        VLOG_ERR("incoming packet : %s",ofp_dp_packet_to_string(packet_to_split));
+        tcpcountsplits = 0; //zero out static split counter before creating new value
+        uint32_t *split_arr = generate_tcp_rand_split_array(packet_to_split);
+
+        //create #tcpcountsplits packets with parts of original payload and send them through random ports
+        int prev = 0;
+        int sequence = 0;
+        for(int i = 0; i < tcpcountsplits; i++)
+        {
+            VLOG_ERR("split_arr[i] %"PRIu32, split_arr[i]); //the length of split i
+            if(split_arr[i] == 0) break; //exit loop since no more splits are available
+
+            char temp_payload[truepayloadsize];
+            strncpy(temp_payload, &complete_payload[prev], split_arr[i]);
+            temp_payload[split_arr[i]] = '\0'; //add end of line
+
+            VLOG_ERR("What I'm copying in split packet %s\n", temp_payload);
+
+
+            /* initialize and fill my_split_packet struct */
+            struct my_tcp_split_packet s_pkt;
+            struct tcp_header *tcph = dp_packet_l4(packet_to_split); //get pointer to L4 of original packet to access its csum
+
+            s_pkt.packet = create_custom_packet(packet_to_split, temp_payload, sizeof(temp_payload)); //insert split packet
+            s_pkt.seq = sequence; //insert sequence in order to reassemble later
+            s_pkt.sizeofpayload = truepayloadsize; //insert size of original payload in order to reassemble later
+            s_pkt.tot_splits = tcpcountsplits; //insert total number of splits so we will know how many to wait for later in order to reassemble
+            s_pkt.tcp_csum = tcph->tcp_csum; //insert checksum so all splits from the same packet will be distinguishable from splits of other packets
+
+
+            struct dp_packet *pkt_to_send = create_custom_packet(packet_to_split, &s_pkt, sizeof s_pkt); // the packet i'm actually sending containing the split
+            // packet and other info useful to reassemble later
+
+            /* this modifies the packet info but somehow the flows don't match on dl_src or dst POSSIBLE BUG HERE nothing too serious */
+            struct eth_header *eth_hdr_for_splits = dp_packet_eth(pkt_to_send);
+            eth_hdr_for_splits->eth_src = fake_mac;
+
+            /* STUFF TO DO
+             * test this
+            */
+            int maxport = getmaxport(ctx->xin->ofproto);
+            //VLOG_ERR("maxport %d", maxport);
+            unsigned int seed = 0;
+            int randport = rand_r(&seed) % maxport;
+
+            ofp_port_t out_port = (randport > 0 && randport != (int) ctx->xin->flow.in_port.ofp_port) ? randport : maxport;
+
+            VLOG_ERR("sending split out of random port %d", (int) out_port);
+            int err_sendsplit = send_pkt_to_port(out_port, ctx->xin->ofproto, pkt_to_send);
+
+            if(err_sendsplit  == 0)
+            {
+                VLOG_ERR("Packet split sent successfully");
+            }
+            else VLOG_ERR("Error in packet split delivery %d", err_sendsplit);
+
+            prev += split_arr[i]; //shift index of payload we are splitting to cut off the part we just split
+            sequence++; //increase sequence number to reassemble packets in order at destination
+            memset(temp_payload, 0, split_arr[i]); //delete split string holder
+        }
+        free(split_arr);
+
+
+    }
+    if(eth_addr_equals(eth_pre_split->eth_src, fake_mac))
+    {
+
+        struct dp_packet *split_recvd = dp_packet_clone(ctx->xin->packet); //clone incoming packet
+
+        struct my_tcp_split_packet *s_pktarr = (struct my_tcp_split_packet *) dp_packet_get_tcp_payload(split_recvd); //get my split packet by casting
+        struct my_tcp_split_packet s_pkt = *s_pktarr;
+
+        int tcp_pkts_to_rebuild = 0; //counter to keep track of packets in the array hold_to_rebuild
+        int i_csum = check_tcpcsum_exists(tcp_hold_to_rebuild, s_pkt); //check if c_sum of received packet already exists in array hold_to_rebuild
+
+        if(i_csum >= 0) //if it exists
+        {
+            VLOG_ERR("found tcp checksum in dictionary ... adding this packet to respective my_tcp_split_packet list");
+            tcp_hold_to_rebuild[i_csum].to_reassemble[s_pkt.seq] = s_pkt;
+            tcp_hold_to_rebuild[i_csum].arrived++;
+
+            //VLOG_ERR("check if array is initialized to 0, printing arrived: %d",hold_to_rebuild[0].arrived);
+            if(tcp_hold_to_rebuild[i_csum].arrived == s_pkt.tot_splits)
+            {
+                VLOG_ERR("all tcp frames have been received, reassembling everything and sending packet");
+                //reass_payload = realloc(reass_payload, sizeof(char) * s_pkt.sizeofpayload);
+                char *reass_payload_tcp = reassemble_tcp_message(tcp_hold_to_rebuild[i_csum].to_reassemble); //assemble all packets in given array to recreate original payload
+                //
+
+                /* create packet to send containing reassembled packet, index of to_reassemble doesn't matter, extracted flows will all be the same*/
+                struct dp_packet *temp_packet = create_custom_packet(tcp_hold_to_rebuild[i_csum].to_reassemble[0].packet, reass_payload_tcp, s_pkt.sizeofpayload);
+                free(reass_payload_tcp);
+                VLOG_INFO("reassembled packet %s", ofp_dp_packet_to_string(temp_packet));
+
+
+                int err_resub_split = resubmit_to_table(ctx, temp_packet); //sumbit reassembled packet to flow table so it can be directed to correct destination host
+                if(err_resub_split  == 0)
+                {
+                    VLOG_ERR("Reaggregated packet resubmitted to flow table successfully ...\nfreeing space at that index ...\nupdating counters ...");
+                    //free(reass_payload);
+                }
+                else VLOG_ERR("Error in reaggregated packet resubmission to flow table %d", err_resub_split);
+
+
+                /* update counters, don't know if this works as zeroing that element of array but it should */
+                tcp_hold_to_rebuild[i_csum].csumkey = 0;
+                tcp_hold_to_rebuild[i_csum].arrived = 0;
+                free(tcp_hold_to_rebuild[i_tcpremoved].to_reassemble);//tcp_hold_to_rebuild[i_csum].to_reassemble = NULL;
+
+                dp_packet_delete(temp_packet); //added later
+
+                i_tcpremoved = i_csum; //set i_removed to i_csum, meaning we can place a totally new packet starting from this index
+                tcp_pkts_to_rebuild--; //if i send a packet also decrease packets contained in hold_to_rebuild dictionary
+
+            }
+
+        }
+        if( i_csum == -1 && tcp_pkts_to_rebuild < PACKETS_TO_HOLD) //if pkts_to_rebuild == 100 drop packets
+        {
+            VLOG_ERR("new packet with never before seen checksum");
+            while(tcp_hold_to_rebuild[i_tcpremoved].csumkey != 0 && i_tcpremoved < PACKETS_TO_HOLD)
+            {
+                VLOG_ERR("looking for first available space in dictionary of splits ");
+                i_tcpremoved++;
+            }
+            if(i_tcpremoved >= PACKETS_TO_HOLD)
+            {
+                VLOG_ERR("tcp packets are getting dropped array is full, might be problematic");
+            }
+            else
+            {
+                VLOG_ERR("placing first packet of a split packet in array");
+                tcp_hold_to_rebuild[i_tcpremoved].csumkey = s_pkt.tcp_csum;
+                tcp_hold_to_rebuild[i_tcpremoved].to_reassemble = malloc(s_pkt.tot_splits * sizeof(struct my_tcp_split_packet));
+                tcp_hold_to_rebuild[i_tcpremoved].to_reassemble[s_pkt.seq] = s_pkt;
+                tcp_hold_to_rebuild[i_tcpremoved].arrived++;
+                tcp_pkts_to_rebuild++; //increase counter of packets to rebuild present in list
+
+            }
+        }
+    }
+}
 
 static int i_removed = 0; //index to check for empty slot in pseudo-dictionary
 static struct csum_to_payload hold_to_rebuild[PACKETS_TO_HOLD] = {{0}}; //pseudo dictionary of 100 elements initialized to 0
-
 static void
 compose_split(struct xlate_ctx *ctx)
 {
     struct eth_addr fake_mac = ETH_ADDR_C(44,34,56,78,9a,bc);
+    struct eth_header *eth_pre_split = dp_packet_eth(ctx->xin->packet); //take ethernet header of incoming packet
 
-    if(ctx->xin->packet)
+    if(!eth_addr_equals(eth_pre_split->eth_src, fake_mac))
     {
-        struct eth_header *eth_pre_split = dp_packet_eth(ctx->xin->packet); //take ethernet header of incoming packet
+        struct dp_packet *packet_to_split = dp_packet_clone(ctx->xin->packet); //clone incoming packet
 
-        if(!eth_addr_equals(eth_pre_split->eth_src, fake_mac))
+        char *complete_payload = (char *) dp_packet_get_udp_payload(packet_to_split);
+        int truepayloadsize =  dp_packet_l4_size(packet_to_split) - UDP_HEADER_LEN;
+
+        VLOG_ERR("incoming packet to split: %.*s",truepayloadsize, complete_payload);
+
+        countsplits = 0; //zero out static split counter before creating new value
+        int *split_arr = generate_rand_split_array(packet_to_split);
+
+
+        int prev = 0;
+        int sequence = 0; // MEGA BUG??? DOVREI CONTROLLARE IL CHECKSUM PRIMA DI INCREMENTARE IL SEQUENCE NUMBER???
+                            // altrimenti pacchetti diversi ricevono numero di sequenza a prescindere se il precedente fa parte della stessa "famiglia"
+        for(int i = 0; i < countsplits; i++)
         {
-            struct dp_packet *packet_to_split = dp_packet_clone(ctx->xin->packet); //clone incoming packet
+            VLOG_ERR("split_arr[i] %d", split_arr[i]); //the length of split i
+            if(split_arr[i] == 0) break; //exit loop since no more splits are available
 
-            char *complete_payload = (char *) dp_packet_get_udp_payload(packet_to_split);
-            int truepayloadsize =  dp_packet_l4_size(packet_to_split) - UDP_HEADER_LEN;
+            char temp_payload[truepayloadsize];
+            strncpy(temp_payload, &complete_payload[prev], split_arr[i]);
+            temp_payload[split_arr[i]] = '\0'; //add end of line
 
-            VLOG_ERR("incoming packet to split: %.*s",truepayloadsize, complete_payload);
-
-            countsplits = 0; //zero out static split counter before creating new value
-            int *split_arr = generate_rand_split_array(packet_to_split);
+            VLOG_ERR("What I'm copying in split packet %s\n", temp_payload);
 
 
-            int prev = 0;
-            int sequence = 0; // MEGA BUG??? DOVREI CONTROLLARE IL CHECKSUM PRIMA DI INCREMENTARE IL SEQUENCE NUMBER???
-                                // altrimenti pacchetti diversi ricevono numero di sequenza a prescindere se il precedente fa parte della stessa "famiglia"
-            for(int i = 0; i < countsplits; i++)
+            /* initialize and fill my_split_packet struct */
+            struct my_split_packet s_pkt;
+            struct udp_header *udph = dp_packet_l4(packet_to_split); //get pointer to L4 of original packet to access its csum
+
+            s_pkt.packet = create_custom_packet(packet_to_split, temp_payload, sizeof(temp_payload)); //insert split packet
+            s_pkt.seq = sequence; //insert sequence in order to reassemble later
+            s_pkt.sizeofpayload = truepayloadsize; //insert size of original payload in order to reassemble later
+            s_pkt.tot_splits = countsplits; //insert total number of splits so we will know how many to wait for later in order to reassemble
+            s_pkt.udp_csum = udph->udp_csum; //insert checksum so all splits from the same packet will be distinguishable from splits of other packets
+
+
+            struct dp_packet *pkt_to_send = create_custom_packet(packet_to_split, &s_pkt, sizeof s_pkt); // the packet i'm actually sending containing the split
+                                                                                                            // packet and other info useful to reassemble later
+
+            /* this modifies the packet info but somehow the flows don't match on dl_src or dst POSSIBLE BUG HERE nothing too serious */
+            struct eth_header *eth_hdr_for_splits = dp_packet_eth(pkt_to_send);
+            eth_hdr_for_splits->eth_src = fake_mac;
+
+            /* STUFF TO DO
+             * test this
+            */
+            int maxport = getmaxport(ctx->xin->ofproto);
+            //VLOG_ERR("maxport %d", maxport);
+            unsigned int seed = 0;
+            int randport = rand_r(&seed) % maxport;
+
+            ofp_port_t out_port = (randport > 0 && randport != (int) ctx->xin->flow.in_port.ofp_port) ? randport : maxport;
+
+            VLOG_ERR("sending split out of random port %d", (int) out_port);
+            int err_sendsplit = send_pkt_to_port(out_port, ctx->xin->ofproto, pkt_to_send);
+
+            if(err_sendsplit  == 0)
             {
-                VLOG_ERR("split_arr[i] %d", split_arr[i]); //the length of split i
-                if(split_arr[i] == 0) break; //exit loop since no more splits are available
+                VLOG_ERR("Packet split sent successfully");
+            }
+            else VLOG_ERR("Error in packet split delivery %d", err_sendsplit);
 
-                char temp_payload[truepayloadsize];
-                strncpy(temp_payload, &complete_payload[prev], split_arr[i]);
-                temp_payload[split_arr[i]] = '\0'; //add end of line
+            prev += split_arr[i]; //shift index of payload we are splitting to cut off the part we just split
+            sequence++; //increase sequence nuymber to allign
+            memset(temp_payload, 0, split_arr[i]); //delete split string holder
+        }
+        free(split_arr);
 
-                VLOG_ERR("What I'm copying in split packet %s\n", temp_payload);
+    }
+    if(eth_addr_equals(eth_pre_split->eth_src, fake_mac))
+    {
 
+        struct dp_packet *split_recvd = dp_packet_clone(ctx->xin->packet); //clone incoming packet
 
-                /* initialize and fill my_split_packet struct */
-                struct my_split_packet s_pkt;
-                struct udp_header *udph = dp_packet_l4(packet_to_split); //get pointer to L4 of original packet to access its csum
-
-                s_pkt.packet = create_custom_packet(packet_to_split, temp_payload, sizeof(temp_payload)); //insert split packet
-                s_pkt.seq = sequence; //insert sequence in order to reassemble later
-                s_pkt.sizeofpayload = truepayloadsize; //insert size of original payload in order to reassemble later
-                s_pkt.tot_splits = countsplits; //insert total number of splits so we will know how many to wait for later in order to reassemble
-                s_pkt.udp_csum = udph->udp_csum; //insert checksum so all splits from the same packet will be distinguishable from splits of other packets
+        struct my_split_packet *s_pktarr = (struct my_split_packet *) dp_packet_get_udp_payload(split_recvd); //get my split packet by casting
+        struct my_split_packet s_pkt = *s_pktarr;
 
 
-                struct dp_packet *pkt_to_send = create_custom_packet(packet_to_split, &s_pkt, sizeof s_pkt); // the packet i'm actually sending containing the split
-                                                                                                                // packet and other info useful to reassemble later
+        int pkts_to_rebuild = 0; //counter to keep track of packets in the array hold_to_rebuild
+        int i_csum = check_csum_exists(hold_to_rebuild, s_pkt); //check if c_sum of received packet already exists in array hold_to_rebuild
 
-                /* this modifies the packet info but somehow the flows don't match on dl_src or dst POSSIBLE BUG HERE nothing too serious */
-                struct eth_header *eth_hdr_for_splits = dp_packet_eth(pkt_to_send);
-                eth_hdr_for_splits->eth_src = fake_mac;
+        if(i_csum >= 0) //if it exists
+        {
+            VLOG_ERR("found checksum in dictionary ... adding this packet to respective my_split_packet list");
+            hold_to_rebuild[i_csum].to_reassemble[s_pkt.seq] = s_pkt;
+            hold_to_rebuild[i_csum].arrived++;
 
-                /* STUFF TO DO
-                 * test this
-                */
-                int maxport = getmaxport(ctx->xin->ofproto);
-                //VLOG_ERR("maxport %d", maxport);
-                unsigned int seed = 0;
-                int randport = rand_r(&seed) % maxport;
+            //VLOG_ERR("check if array is initialized to 0, printing arrived: %d",hold_to_rebuild[0].arrived);
+            if( hold_to_rebuild[i_csum].arrived == s_pkt.tot_splits )
+            {
+                VLOG_ERR("all frames have been received reassembling everything and sending packet");
 
-                ofp_port_t out_port = (randport > 0 && randport != (int) ctx->xin->flow.in_port.ofp_port) ? randport : maxport;
+                char *reass_payload = reassemble_message(hold_to_rebuild[i_csum].to_reassemble); //assemble all packets in given array to recreate original payload
 
-                VLOG_ERR("sending split out of random port %d", (int) out_port);
-                int err_sendsplit = send_pkt_to_port(out_port, ctx->xin->ofproto, pkt_to_send);
+                /* create packet to send containing reassembled packet */
+                struct dp_packet *temp_packet = create_custom_packet(hold_to_rebuild[i_csum].to_reassemble[0].packet, reass_payload, s_pkt.sizeofpayload);
+                free(reass_payload);
+                //VLOG_ERR("reassembled packet %s", ofp_dp_packet_to_string(temp_packet));
+                //VLOG_ERR("paylaod of pkt to be resubbed %.*s",s_pkt.sizeofpayload, (char *) dp_packet_get_udp_payload(temp_packet));
 
-                if(err_sendsplit  == 0)
+                int err_resub_split = resubmit_to_table(ctx, temp_packet); //sumbit reassembled packet to flow table so it can be directed to correct destination host
+                if(err_resub_split  == 0)
                 {
-                    VLOG_ERR("Packet split sent successfully");
+                    VLOG_ERR("Reaggregated packet resubmitted to flow table successfully ...\nfreeing space at that index ...\nupdating counters ...");
                 }
-                else VLOG_ERR("Error in packet split delivery %d", err_sendsplit);
+                else VLOG_ERR("Error in reaggregated packet resubmission to flow table %d", err_resub_split);
 
-                prev += split_arr[i]; //shift index of payload we are splitting to cut off the part we just split
-                sequence++; //increase sequence nuymber to allign
-                memset(temp_payload, 0, split_arr[i]); //delete split string holder
+
+                /* update counters, don't know if this works as zeroing that element of array but it should */
+                hold_to_rebuild[i_csum].csumkey = 0;
+                hold_to_rebuild[i_csum].arrived = 0;
+                free(hold_to_rebuild[i_csum].to_reassemble);//hold_to_rebuild[i_csum].to_reassemble = NULL;
+
+
+                i_removed = i_csum; //set i_removed to i_csum, meaning we can place a totally new packet starting from this index
+                pkts_to_rebuild--; //if i send a packet also decrease packets contained in hold_to_rebuild dictionary
             }
 
         }
-        if(eth_addr_equals(eth_pre_split->eth_src, fake_mac))
+        if( i_csum == -1 && pkts_to_rebuild < PACKETS_TO_HOLD) //if pkts_to_rebuild == 100 drop packets
         {
-
-            struct dp_packet *split_recvd = dp_packet_clone(ctx->xin->packet); //clone incoming packet
-
-            struct my_split_packet *s_pktarr = (struct my_split_packet *) dp_packet_get_udp_payload(split_recvd); //get my split packet by casting
-            struct my_split_packet s_pkt = *s_pktarr;
-
-
-            int pkts_to_rebuild = 0; //counter to keep track of packets in the array hold_to_rebuild
-            int i_csum = check_csum_exists(hold_to_rebuild, s_pkt); //check if c_sum of received packet already exists in array hold_to_rebuild
-
-            if(i_csum >= 0) //if it exists
+            VLOG_ERR("new packet with never before seen checksum");
+            while(hold_to_rebuild[i_removed].csumkey != 0 && i_removed < PACKETS_TO_HOLD)
             {
-                VLOG_ERR("found checksum in dictionary ... adding this packet to respective my_split_packet list");
-                hold_to_rebuild[i_csum].to_reassemble[s_pkt.seq] = s_pkt;
-                hold_to_rebuild[i_csum].arrived++;
-
-                //VLOG_ERR("check if array is initialized to 0, printing arrived: %d",hold_to_rebuild[0].arrived);
-                if( hold_to_rebuild[i_csum].arrived == s_pkt.tot_splits )
-                {
-                    VLOG_ERR("all frames have been received reassembling everything and sending packet");
-
-                    char *reass_payload = reassemble_message(hold_to_rebuild[i_csum].to_reassemble); //assemble all packets in given array to recreate original payload
-
-                    /* create packet to send containing reassembled packet */
-                    struct dp_packet *temp_packet = create_custom_packet(hold_to_rebuild[i_csum].to_reassemble[0].packet, reass_payload, s_pkt.sizeofpayload);
-
-                    //VLOG_ERR("reassembled packet %s", ofp_dp_packet_to_string(temp_packet));
-                    //VLOG_ERR("paylaod of pkt to be resubbed %.*s",s_pkt.sizeofpayload, (char *) dp_packet_get_udp_payload(temp_packet));
-
-                    int err_resub_split = resubmit_to_table(ctx, temp_packet); //sumbit reassembled packet to flow table so it can be directed to correct destination host
-                    if(err_resub_split  == 0)
-                    {
-                        VLOG_ERR("Reaggregated packet resubmitted to flow table successfully ...\nfreeing space at that index ...\nupdating counters ...");
-                    }
-                    else VLOG_ERR("Error in reaggregated packet resubmission to flow table %d", err_resub_split);
-
-
-                    /* update counters, don't know if this works as zeroing that element of array but it should */
-                    hold_to_rebuild[i_csum].csumkey = 0;
-                    hold_to_rebuild[i_csum].arrived = 0;
-                    hold_to_rebuild[i_csum].to_reassemble = NULL;
-
-
-                    i_removed = i_csum; //set i_removed to i_csum, meaning we can place a totally new packet starting from this index
-                    pkts_to_rebuild--; //if i send a packet also decrease packets contained in hold_to_rebuild dictionary
-                }
-
+                VLOG_ERR("looking for first available space in dictionary of splits ");
+                i_removed++;
             }
-            if( i_csum == -1 && pkts_to_rebuild < PACKETS_TO_HOLD) //if pkts_to_rebuild == 100 drop packets
+            if(i_removed >= PACKETS_TO_HOLD)
             {
-                VLOG_ERR("new packet with never before seen checksum");
-                while(hold_to_rebuild[i_removed].csumkey != 0 && i_removed < PACKETS_TO_HOLD)
-                {
-                    VLOG_ERR("looking for first available space in dictionary of splits ");
-                    i_removed++;
-                }
-                if(i_removed >= PACKETS_TO_HOLD)
-                {
-                    VLOG_ERR("packets are getting dropped array is full");
-                }
-                else
-                {
-                    VLOG_ERR("placing first packet of a split packet in array");
-                    hold_to_rebuild[i_removed].csumkey = s_pkt.udp_csum;
-                    hold_to_rebuild[i_removed].to_reassemble = malloc(s_pkt.tot_splits * sizeof(struct my_split_packet));
-                    hold_to_rebuild[i_removed].to_reassemble[s_pkt.seq] = s_pkt;
-                    hold_to_rebuild[i_removed].arrived++;
-                    pkts_to_rebuild++; //increase counter of packets to rebuild present in list
+                VLOG_ERR("packets are getting dropped array is full");
+            }
+            else
+            {
+                VLOG_ERR("placing first packet of a split packet in array");
+                hold_to_rebuild[i_removed].csumkey = s_pkt.udp_csum;
+                hold_to_rebuild[i_removed].to_reassemble = malloc(s_pkt.tot_splits * sizeof(struct my_split_packet));
+                hold_to_rebuild[i_removed].to_reassemble[s_pkt.seq] = s_pkt;
+                hold_to_rebuild[i_removed].arrived++;
+                pkts_to_rebuild++; //increase counter of packets to rebuild present in list
 
-                }
             }
         }
     }
+
 
 }
 static void
@@ -7763,57 +8252,131 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
             break;
         case OFPACT_AGGRS:
         {
-            ctx->xout->slow |= SLOW_ACTION;
-            //VLOG_ERR("table id: %"PRIu8, ctx->table_id);
-            //VLOG_ERR("is internal %d" , rule_dpif_is_internal(ctx->rule));
             struct ofpact_aggrs *aggrs = ofpact_get_AGGRS(a);
-
-            int fl_entry_index = check_flow_exists(my_flow_dict, aggrs->flowid);
-            if(fl_entry_index >=0 && ctx->xin->packet) //aggiunto "ctx->xin->packet" per problemi con ryu ctx->xin->packet
+            if(ctx->xin->packet)
             {
-                VLOG_ERR("flow with id %d already present in dictionary at index: %d...\n"
-                         "adding packet there", aggrs->flowid, fl_entry_index);
-
-                compose_aggrs_action(ctx, aggrs, &my_flow_dict[fl_entry_index], fl_entry_index);
-            }
-            if(fl_entry_index == -1 && flows_in_dict < FLOWS_TO_HOLD && ctx->xin->packet) //aggiunto "ctx->xin->packet" per problemi con ryu ctx->xin->packet
-            {
-                VLOG_ERR("new flow that requires aggregation found with flowid: %d"
-                         "creating entry in dictionary...", aggrs->flowid);
-                while(my_flow_dict[index_for_dict].flow_id !=0 && index_for_dict < FLOWS_TO_HOLD )
+                ctx->xout->slow |= SLOW_ACTION;
+                //ctx->xout->avoid_caching = true;
+                /* tcp stuff
+                 * */
+                struct dp_packet *packet = dp_packet_clone(ctx->xin->packet);
+                struct tcp_header *tcph = dp_packet_l4(packet);
+                uint32_t len = tcp_payload_length(packet);
+                int flags = TCP_FLAGS(tcph->tcp_ctl);
+                if(ctx->xin->flow.nw_proto == 6) //if buffer of packets with given flowid exists
                 {
-                    VLOG_ERR("looking for first available space in dictionary of flows ...");
-                    index_for_dict++;
+                    int fl_entry_index_tcp = check_flow_exists_tcp(my_flow_dict_tcp, aggrs->flowid);
+                    if(fl_entry_index_tcp >=0) //if unfilled buffer exists
+                    {
+
+                        if(len == 0 || flags == 25)
+                        {
+                            VLOG_INFO("syn,ack,syn-ack or fin-psh-ack caught, sending through without aggregation");
+                            send_pkt_to_port(u16_to_ofp(aggrs->port), ctx->xin->ofproto, packet);
+                            break;
+                        }
+                        else
+                        {
+                            compose_aggrs_action_tcp(ctx, packet, aggrs, &my_flow_dict_tcp[fl_entry_index_tcp], fl_entry_index_tcp);
+                        }
+                    }
+                    if(fl_entry_index_tcp == -1 && flows_in_dict_tcp < FLOWS_TO_HOLD && ctx->xin->flow.nw_proto == 6) 
+                    {
+                        //struct dp_packet *rubbishpkt = dp_packet_clone(ctx->xin->packet);
+                        //struct tcp_header *tcph = dp_packet_l4(rubbishpkt);
+                        if(len == 0 || flags == 25)
+                        {
+                            //VLOG_ERR("structure of packet before change: %s ", ofp_dp_packet_to_string(rubbishpkt));
+                            VLOG_ERR("syn acks stuff sending through on port %d", (int) aggrs->port);
+                            send_pkt_to_port(u16_to_ofp(aggrs->port), ctx->xin->ofproto, packet);
+                            break;
+                        }
+                        else
+                        {
+                            VLOG_ERR("new TCP flow that requires aggregation found with flowid: %d"
+                                     "creating entry in dictionary...", aggrs->flowid);
+                            while(my_flow_dict_tcp[index_for_dict_tcp].flow_id !=0 && index_for_dict_tcp < FLOWS_TO_HOLD )
+                            {
+                                VLOG_ERR("looking for first available space in dictionary of flows ...");
+                                index_for_dict_tcp++;
+                            }
+                            if(index_for_dict_tcp >= FLOWS_TO_HOLD)
+                            {
+                                VLOG_ERR("TCP dictionary of flows full, check FLOWS_TO_HOLD number of flows ...\n"
+                                         "maybe consider splitting instead");
+                            }
+                            else
+                            {
+                                VLOG_ERR("placing first TCP packet in the array at dict index: %d", index_for_dict_tcp);
+                                my_flow_dict_tcp[index_for_dict_tcp].flow_id = aggrs->flowid;
+                                //hold_to_rebuild[i_removed].to_reassemble = malloc(s_pkt.tot_splits * sizeof(struct my_split_packet));
+                                my_flow_dict_tcp[index_for_dict_tcp].index = 0;
+                                //my_flow_dict[index_for_dict].buffer_full = false;
+                                flows_in_dict_tcp++;
+                                //thread stuff, including initializing arugments thread needs in order to send the buffer prematurely if timer ends
+                                my_flow_dict_tcp[index_for_dict_tcp].argsForThread.timerstop = false;
+                                my_flow_dict_tcp[index_for_dict_tcp].argsForThread.flow_entry_index = index_for_dict_tcp;
+                                my_flow_dict_tcp[index_for_dict_tcp].argsForThread.dict_entry = &my_flow_dict_tcp[index_for_dict_tcp];
+                                my_flow_dict_tcp[index_for_dict_tcp].argsForThread.aggrs = aggrs;
+                                my_flow_dict_tcp[index_for_dict_tcp].argsForThread.ofproto = ctx->xin->ofproto;
+                                pthread_create(&my_flow_dict_tcp[index_for_dict_tcp].tid, NULL, threadproc_tcp,  (void *)&my_flow_dict_tcp[index_for_dict_tcp].argsForThread);
+                                //VLOG_ERR("entered compose tcp");
+                                compose_aggrs_action_tcp(ctx, packet, aggrs, &my_flow_dict_tcp[index_for_dict_tcp], index_for_dict_tcp);
+
+                            }
+                        }
+
+
+                    }
+
                 }
-                if(index_for_dict >= FLOWS_TO_HOLD)
+                /* UDP  stuff */
+                if(ctx->xin->flow.nw_proto == 17) //aggiunto "ctx->xin->packet" per problemi con ryu ctx->xin->packet
                 {
-                    VLOG_ERR("dictionary of flows full of FLOWS_TO_HOLD number of flows already...\n"
-                             "maybe consider splitting instead");
+                    int fl_entry_index = check_flow_exists(my_flow_dict, aggrs->flowid);
+                    if(fl_entry_index >=0)
+                    {
+                        VLOG_ERR("udp flow with id %d already present in dictionary at index: %d...\n"
+                                 "adding packet there", aggrs->flowid, fl_entry_index);
+
+                        compose_aggrs_action(ctx, packet, aggrs, &my_flow_dict[fl_entry_index], fl_entry_index);
+                    }
+                    if(fl_entry_index == -1 && flows_in_dict < FLOWS_TO_HOLD && ctx->xin->flow.nw_proto == 17) //aggiunto "ctx->xin->packet" per problemi con ryu ctx->xin->packet
+                    {
+                        VLOG_ERR("new flow that requires aggregation found with flowid: %d"
+                                 "creating entry in dictionary...", aggrs->flowid);
+                        while(my_flow_dict[index_for_dict].flow_id !=0 && index_for_dict < FLOWS_TO_HOLD )
+                        {
+                            VLOG_ERR("looking for first available space in dictionary of flows ...");
+                            index_for_dict++;
+                        }
+                        if(index_for_dict >= FLOWS_TO_HOLD)
+                        {
+                            VLOG_ERR("dictionary of flows full of FLOWS_TO_HOLD number of flows already...\n"
+                                     "maybe consider splitting instead");
+                        }
+                        else
+                        {
+                            VLOG_ERR("placing first packet in the array at dict index: %d", index_for_dict);
+                            my_flow_dict[index_for_dict].flow_id = aggrs->flowid;
+                            //hold_to_rebuild[i_removed].to_reassemble = malloc(s_pkt.tot_splits * sizeof(struct my_split_packet));
+                            my_flow_dict[index_for_dict].index = 0;
+                            //my_flow_dict[index_for_dict].buffer_full = false;
+                            flows_in_dict++;
+                            //thread stuff, including initializing arugments thread needs in order to send the buffer prematurely if timer ends
+                            my_flow_dict[index_for_dict].argsForThread.timerstop = false;
+                            my_flow_dict[index_for_dict].argsForThread.flow_entry_index = index_for_dict;
+                            my_flow_dict[index_for_dict].argsForThread.dict_entry = &my_flow_dict[index_for_dict];
+                            my_flow_dict[index_for_dict].argsForThread.aggrs = aggrs;
+                            my_flow_dict[index_for_dict].argsForThread.ofproto = ctx->xin->ofproto;
+                            pthread_create(&my_flow_dict[index_for_dict].tid, NULL, threadproc,  (void *)&my_flow_dict[index_for_dict].argsForThread);
+
+                            compose_aggrs_action(ctx, packet, aggrs, &my_flow_dict[index_for_dict], index_for_dict);
+
+                        }
+                    }
+
                 }
-                else
-                {
-                    VLOG_ERR("placing first packet in the array at dict index: %d", index_for_dict);
-                    my_flow_dict[index_for_dict].flow_id = aggrs->flowid;
-                    //hold_to_rebuild[i_removed].to_reassemble = malloc(s_pkt.tot_splits * sizeof(struct my_split_packet));
-                    my_flow_dict[index_for_dict].index = 0;
-                    //my_flow_dict[index_for_dict].buffer_full = false;
-                    flows_in_dict++;
-                    //thread stuff, including initializing arugments thread needs in order to send the buffer prematurely if timer ends
-                    my_flow_dict[index_for_dict].argsForThread.timerstop = false;
-                    my_flow_dict[index_for_dict].argsForThread.flow_entry_index = index_for_dict;
-                    my_flow_dict[index_for_dict].argsForThread.dict_entry = &my_flow_dict[index_for_dict];
-                    my_flow_dict[index_for_dict].argsForThread.aggrs = aggrs;
-                    my_flow_dict[index_for_dict].argsForThread.ofproto = ctx->xin->ofproto;
-                    pthread_create(&my_flow_dict[index_for_dict].tid, NULL, threadproc,  (void *)&my_flow_dict[index_for_dict].argsForThread);
-
-                    compose_aggrs_action(ctx, aggrs, &my_flow_dict[index_for_dict], index_for_dict);
-
-                    /*
-                     *
-                     * pthread_create(&my_flow_dict[index_for_dict].tid, NULL, threadproc,  (void *)&my_flow_dict[index_for_dict].argsForThread);
-                    */
-                }
-
 
             }
 
@@ -7822,14 +8385,51 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
         case OFPACT_DEAGGR:
         {
             ctx->xout->slow |= SLOW_ACTION;
-            compose_deaggr(ctx);
+
+            if(ctx->xin->flow.nw_proto == 6)
+            {
+                //struct dp_packet *rubbishpkt = dp_packet_clone(ctx->xin->packet);
+                //if(tcp_payload_length(rubbishpkt) == 0) break;
+                //else
+                compose_deaggr_tcp(ctx);
+            }
+            if(ctx->xin->flow.nw_proto == 17)
+            {
+                compose_deaggr(ctx);
+            }
             break;
         }
         case OFPACT_SPLIT:
         {
             ctx->xout->slow |= SLOW_ACTION;
-            compose_split(ctx);
+
+            //VLOG_ERR("ip proto : %" PRIu8, ctx->xin->flow.nw_proto);
+            //tcp traffic case
+            if(ctx->xin->packet)
+            {
+                if(ctx->xin->flow.nw_proto == 6)
+                {
+                    struct dp_packet *rubbishpkt = dp_packet_clone(ctx->xin->packet);
+                    struct tcp_header *tcph = dp_packet_l4(rubbishpkt);
+                    if(tcp_payload_length(rubbishpkt) == 0 || TCP_FLAGS(tcph->tcp_ctl) == 25)
+                    {
+                        int maxport = getmaxport(ctx->xin->ofproto);
+                        VLOG_ERR("syn acks stuff caught by split flow sending through normally on port: %d", maxport);
+                        send_pkt_to_port((ofp_port_t) maxport, ctx->xin->ofproto, rubbishpkt);
+                        break;
+                    }
+                    //if(ctx->xin->flow.)
+                    compose_split_tcp(ctx);
+                }
+                if(ctx->xin->flow.nw_proto == 17)
+                {
+                    compose_split(ctx);
+                }
+                break;
+            }
             break;
+
+
         }
         case OFPACT_DEBUG_RECIRC:
             ctx_trigger_freeze(ctx);
