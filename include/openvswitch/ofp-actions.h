@@ -129,6 +129,7 @@ struct vl_mff_map;
     OFPACT(AGGRS,            ofpact_aggrs, 	    ofpact, "aggrs")        \
     OFPACT(DEAGGR,           ofpact_deaggr, 	ofpact, "deaggr")       \
     OFPACT(SPLIT,            ofpact_split, 	    ofpact, "split")        \
+    OFPACT(REASS,            ofpact_reass, 	    ofpact, "reass")        \
                                                                         \
     /* Debugging actions.                                               \
      *                                                                  \
@@ -1149,6 +1150,12 @@ struct ofpact_deaggr{
 struct ofpact_split{
     OFPACT_PADDED_MEMBERS(
         struct ofpact ofpact;
+
+    );
+};
+struct ofpact_reass{
+    OFPACT_PADDED_MEMBERS(
+            struct ofpact ofpact;
 
     );
 };

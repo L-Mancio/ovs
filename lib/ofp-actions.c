@@ -364,6 +364,9 @@ enum ofp_raw_action_type {
     /* OF1.0+(82): void. */
     OFPAT_RAW_SPLIT,
 
+    /* OF1.0+(83): void. */
+    OFPAT_RAW_REASS,
+
     /* NX1.3+(48): void. */
     NXAST_RAW_DEC_NSH_TTL,
 
@@ -516,6 +519,8 @@ ofpact_next_flattened(const struct ofpact *ofpact)
     case OFPACT_DEAGGR: //DID STUFF HERE ON TUT.
         return ofpact_next(ofpact);
     case OFPACT_SPLIT:
+        return ofpact_next(ofpact);
+    case OFPACT_REASS:
         return ofpact_next(ofpact);
     case OFPACT_CHECK_PKT_LARGER:
     case OFPACT_DELETE_FIELD:
@@ -7916,6 +7921,51 @@ check_SPLIT(const struct ofpact_split *split OVS_UNUSED,
     //return ofpact_check_output_port(deaggr->port, cp->max_ports);
     return 0;
 }
+static void
+encode_REASS(const struct ofpact_reass *reass OVS_UNUSED,
+             enum ofp_version ofp_version OVS_UNUSED,
+             struct ofpbuf *out OVS_UNUSED)
+{
+
+    printf("some reass encoding stuff \n");
+    put_OFPAT_REASS(out);
+}
+static enum ofperr
+decode_OFPAT_RAW_REASS(struct ofpbuf *out)
+{
+
+    printf("some reass decoding stuff \n");
+    ofpact_put_REASS(out);
+
+    return 0;
+}
+static char * OVS_WARN_UNUSED_RESULT
+parse_REASS(char *arg, const struct ofpact_parse_params *pp) //
+{
+
+    printf("some reass parsing stuff %s\n", arg);
+    ofpact_put_REASS(pp->ofpacts);
+
+    return NULL;
+    //return parse_deaggr(arg, pp->ofpacts);
+}
+static void
+format_REASS(const struct ofpact_reass *reass OVS_UNUSED,
+             const struct ofpact_format_params *fp)
+{
+    printf("some reass formatting stuff \n");
+    ds_put_format(fp->s, "%sreass%s", colors.value, colors.end);
+
+}
+static enum ofperr
+check_REASS(const struct ofpact_reass *split OVS_UNUSED,
+            const struct ofpact_check_params *cp OVS_UNUSED )
+{
+
+    //return ofpact_check_output_port(deaggr->port, cp->max_ports);
+    return 0;
+}
+
 
 static void
 log_bad_action(const struct ofp_action_header *actions, size_t actions_len,
@@ -8157,6 +8207,7 @@ action_set_classify(const struct ofpact *a)
         //return ACTION_SLOT_SET_OR_MOVE;
     case OFPACT_DEAGGR:
     case OFPACT_SPLIT:
+    case OFPACT_REASS:
     case OFPACT_CHECK_PKT_LARGER:
     case OFPACT_DELETE_FIELD:
         return ACTION_SLOT_INVALID;
@@ -8365,6 +8416,7 @@ ovs_instruction_type_from_ofpact_type(enum ofpact_type type,
     case OFPACT_AGGRS:
     case OFPACT_DEAGGR:
     case OFPACT_SPLIT:
+    case OFPACT_REASS:
     case OFPACT_DELETE_FIELD:
     default:
         return OVSINST_OFPIT11_APPLY_ACTIONS;
@@ -9225,6 +9277,7 @@ ofpact_outputs_to_port(const struct ofpact *ofpact, ofp_port_t port)
     case OFPACT_DEAGGR:
         //return port == OFPP_NORMAL; //aggiunto
     case OFPACT_SPLIT:
+    case OFPACT_REASS:
     case OFPACT_OUTPUT_REG:
     case OFPACT_OUTPUT_TRUNC:
     case OFPACT_BUNDLE:
