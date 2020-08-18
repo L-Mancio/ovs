@@ -6422,7 +6422,7 @@ compose_reass_tcp(struct xlate_ctx *ctx)
                 tcph->tcp_ack = tcp_hold_to_rebuild[i_csum].to_reassemble[0].tcp_ack;
                 tcph->tcp_ctl = tcp_hold_to_rebuild[i_csum].to_reassemble[0].tcp_ctl;
                 tcph->tcp_winsz = tcp_hold_to_rebuild[i_csum].to_reassemble[0].tcp_winsz;
-                //tcph->tcp_csum = tcp_hold_to_rebuild[i_csum].to_reassemble[0].tcp_csum;
+                tcph->tcp_csum = tcp_hold_to_rebuild[i_csum].to_reassemble[0].tcp_csum;
                 tcph->tcp_urg = tcp_hold_to_rebuild[i_csum].to_reassemble[0].tcp_urg;
 
                 VLOG_INFO("reassembled packet %s", ofp_dp_packet_to_string(temp_packet));
@@ -8526,11 +8526,12 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
                         if(tcp_payload_length(rubbishpkt) == 0 || TCP_FLAGS(tcph->tcp_ctl) == 25)
                         {
                             int maxport = getmaxport(ctx->xin->ofproto);
+                            //VLOG_ERR("maxport before if %d", maxport);
                             //if(maxport == 2 || maxport == 4) //needed to collect data on splittopo.py
                             //{
-                              //  maxport = 1;
+                               //maxport = 2;
                            // }
-
+                            //VLOG_ERR("maxport %d", maxport);
                             VLOG_ERR("syn acks stuff caught by split flow sending through normally on port: %d", maxport);
                             send_pkt_to_port((ofp_port_t) maxport, ctx->xin->ofproto, rubbishpkt);
                             break;
