@@ -5928,7 +5928,7 @@ struct tcp_csum_to_payload
 /* scans our pseudo-dictionary @ctp to see if csum contianed by @spkt is already present in it
  * return index position @csum_i if present
  * else -1 */
-#define PACKETS_TO_HOLD 1000
+#define PACKETS_TO_HOLD 10000
 static int
 check_csum_exists(struct csum_to_payload *ctp, struct my_split_packet spkt)
 {
@@ -5964,7 +5964,7 @@ static char *
 reassemble_message(struct my_split_packet *msp)
 {
     VLOG_ERR("tot splits: %d, sizepayload %d", msp[0].tot_splits, msp[0].sizeofpayload);
-    char *temp_payload = (char*) malloc(sizeof(char) * msp[0].sizeofpayload + 1);//malloc(msp[0].sizeofpayload);//[msp[0].sizeofpayload];
+    char *temp_payload = (char*) malloc(sizeof(char) * msp[0].sizeofpayload);//malloc(msp[0].sizeofpayload);//[msp[0].sizeofpayload];
     temp_payload[0] = '\0'; //clear temp payload
     int len = 0;
     for(int i=0; i < msp[0].tot_splits; i++)
@@ -5983,7 +5983,7 @@ static char *
 reassemble_tcp_message(struct my_tcp_split_packet *msp1)
 {
     VLOG_ERR("tot splits: %d, sizepayload %u", msp1[0].tot_splits, msp1[0].sizeofpayload);
-    char *temp_payload_reass = malloc(sizeof(char) * msp1[0].sizeofpayload + 1);
+    char *temp_payload_reass = malloc(sizeof(char) * msp1[0].sizeofpayload);
     temp_payload_reass[0] = '\0';
     int len =0;
     //add splits one by one with memcpy since encrypted payloads often contain '\0' in between the payload and with strncat it would stop prematurely
@@ -6069,7 +6069,7 @@ generate_tcp_rand_split_array(struct dp_packet *packet_to_split)
 
 /*split only works when max 2 hosts are attached to a single switch*/
 static void
-compose_split_tcp(struct xlate_ctx *ctx)
+compose_split_tcp(struct xlate_ctx *ctx, uint16_t port)
 {
     struct eth_addr fake_mac = ETH_ADDR_C(44,34,56,78,9a,bc);
     struct eth_header *eth_pre_split = dp_packet_eth(ctx->xin->packet); //take ethernet header of incoming packet
@@ -6093,7 +6093,7 @@ compose_split_tcp(struct xlate_ctx *ctx)
             VLOG_ERR("split_arr[i] %u", split_arr[i]); //the length of split i
             //if(split_arr[i] == 0) break; //exit loop since no more splits are available
 
-            char *temp_payload = malloc(sizeof(char *) * split_arr[i] + 1);
+            char *temp_payload = malloc(sizeof(char *) * split_arr[i]);
             temp_payload[0] ='\0';
             memcpy(temp_payload, &complete_payload[prev], split_arr[i]); //was strncat
             //temp_payload[split_arr[i]] = '\0'; //don't need this we have the original packet including last carriage return
@@ -6135,31 +6135,25 @@ compose_split_tcp(struct xlate_ctx *ctx)
             iph->ip_dst = netip;
 
             /* STUFF TO DO
-             * test this
+             *
             */
             int maxport = getmaxport(ctx->xin->ofproto);
             int randport = 0;
-            if (maxport < 2)
+            if(port != 0)
             {
-                randport = 1;
+                randport = port;
             }
-            if(maxport == 2 || maxport == 4 || maxport == 7)
-            {
-                VLOG_ERR("PORT SHENANIGANS");
-                randport = 2; //for testing purposes turn to 1 else 2
-            }
-            else if (maxport > 2)
+            if(port == 0)
             {
                 unsigned int seed = 0;
-                int low = 3;
+                int low = 3; //assume lowest valid port is 3 given assumption of 2 hosts max per switch
                 int high = maxport;
-                randport = (rand_r(&seed) % (high - low + 1)) + low;
-
+                randport = (rand_r(&seed) % (high - low + 1)) + low; //select random port between [low,high]
             }
-
+            //out_port will be randport if randport > 0 and not equal to the input port, else send to maxport
             ofp_port_t out_port = (randport > 0 && randport != (int) ctx->xin->flow.in_port.ofp_port) ? randport : maxport;
 
-            //VLOG_ERR("sending split out of random port %d", (int) out_port);
+            VLOG_ERR("sending split out of random port %d", (int) out_port);
             int err_sendsplit = send_pkt_to_port(out_port, ctx->xin->ofproto, pkt_to_send);
 
             if(err_sendsplit  == 0)
@@ -6183,7 +6177,7 @@ compose_split_tcp(struct xlate_ctx *ctx)
 //static int i_removed = 0; //index to check for empty slot in pseudo-dictionary
 //static struct csum_to_payload hold_to_rebuild[PACKETS_TO_HOLD] = {{0}}; //pseudo dictionary of 100 elements initialized to 0
 static void
-compose_split(struct xlate_ctx *ctx)
+compose_split(struct xlate_ctx *ctx, uint16_t port)
 {
     struct eth_addr fake_mac = ETH_ADDR_C(44,34,56,78,9a,bc);
     //struct eth_header *eth_pre_split = dp_packet_eth(ctx->xin->packet); //take ethernet header of incoming packet
@@ -6203,7 +6197,7 @@ compose_split(struct xlate_ctx *ctx)
         VLOG_ERR("split_arr[i] %d", split_arr[i]); //the length of split i
         if(split_arr[i] == 0) break; //exit loop since no more splits are available
 
-        char *temp_payload = malloc(sizeof(char *) * split_arr[i] + 1);//char temp_payload[split_arr[i]];
+        char *temp_payload = malloc(sizeof(char *) * split_arr[i]);//char temp_payload[split_arr[i]];
         temp_payload[0] ='\0';
         memcpy(temp_payload, &complete_payload[prev], split_arr[i]);
         //temp_payload[split_arr[i]] = '\0'; //don't need this we have the original packet including last carriage return
@@ -6242,27 +6236,19 @@ compose_split(struct xlate_ctx *ctx)
          * test this
         */
         int maxport = getmaxport(ctx->xin->ofproto);
-        //VLOG_ERR("maxport %d", maxport);
         int randport = 0;
-        if (maxport < 2)
+        if(port != 0)
         {
-            randport = 1;
+            randport = port;
         }
-        if(maxport == 2)
-        {
-            randport = 2;
-        }
-        else if (maxport > 2)
+        if(port == 0)
         {
             unsigned int seed = 0;
-            int low = 3;
+            int low = 3; //assume lowest valid port is 3 given assumption of 2 hosts max per switch
             int high = maxport;
-            randport = (rand_r(&seed) % (high - low + 1)) + low;
-
+            randport = (rand_r(&seed) % (high - low + 1)) + low; //select random port between [low,high]
         }
-        //unsigned int seed = 0;
-        //int randport = rand_r(&seed) % maxport;
-
+        //out_port will be randport if randport > 0 and not equal to the input port, else send to maxport
         ofp_port_t out_port = (randport > 0 && randport != (int) ctx->xin->flow.in_port.ofp_port) ? randport : maxport;
 
         VLOG_ERR("sending split out of random port %d", (int) out_port);
@@ -8371,7 +8357,7 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
                     {
                         VLOG_ERR("there are: %d TCP spots taken in array dict", flows_in_dict_tcp);
                         int fl_entry_index_tcp = check_flow_exists_tcp(my_flow_dict_tcp, aggrs->flowid);
-                        if(len == 0 || flags == 25 || truepay[0] == 22)
+                        if(len == 0 || flags == 25 || truepay[0] == 22 || truepay[0] == 20)
                         {
                             VLOG_ERR("structure of ack packet sending through: %s ",  ofp_dp_packet_to_string(packet));
                             //VLOG_INFO("syn,ack,syn-ack or fin-psh-ack caught, sending through without aggregation");
@@ -8503,10 +8489,12 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
             }
             case OFPACT_SPLIT:
             {
+                /*
+                 * assume no more than 3 hosts connected to starting switch, if we need more set minimum port > 3, else range ports [3,maxport]
+                 * if split port != 0 it will send packet to a random port in the range described above else send packet to the port specified
+                 */
                 ctx->xout->slow |= SLOW_ACTION;
-
-                //VLOG_ERR("ip proto : %" PRIu8, ctx->xin->flow.nw_proto);
-                //tcp traffic case
+                uint16_t port = ofpact_get_SPLIT(a)->port;
                 if(ctx->xin->packet)
                 {
                     if(ctx->xin->flow.nw_proto == 6)
@@ -8514,30 +8502,47 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
                         struct dp_packet *rubbishpkt = dp_packet_clone(ctx->xin->packet);
                         struct tcp_header *tcph = dp_packet_l4(rubbishpkt);
                         char *truepay = (char *) dp_packet_get_tcp_payload(rubbishpkt);
-                        //uint32_t size_p = tcp_payload_length(rubbishpkt);
+
                         if(tcp_payload_length(rubbishpkt) == 0 || TCP_FLAGS(tcph->tcp_ctl) == 25 || truepay[0] == 22 || truepay[0] == 20) //20 change cipher spec, 22 all handhsake stuff, dec to hex to understand what flags are
                         {
-                            int maxport = getmaxport(ctx->xin->ofproto);
-                            VLOG_ERR("maxport before if %d", maxport);
-                            if(maxport == 2 || maxport == 4 || maxport == 7) //needed to collect data on splittopo.py
+                            if(port != 0)
                             {
-                               maxport = 2;
+                                VLOG_ERR("syn acks stuff caught by split flow sending through normally on port: %u", port);
+                                send_pkt_to_port((ofp_port_t) port, ctx->xin->ofproto, rubbishpkt);
+                                break;
                             }
-                            //VLOG_ERR("maxport %d", maxport);
-                            VLOG_ERR("syn acks stuff caught by split flow sending through normally on port: %d", maxport);
-                            send_pkt_to_port((ofp_port_t) maxport, ctx->xin->ofproto, rubbishpkt);
-                            break;
+                            if(port == 0)
+                            {
+                                int maxport = getmaxport(ctx->xin->ofproto);
+                                //VLOG_ERR("MAXPORT IS: %d", maxport);
+                                int randport = 0;
+                                unsigned int seed = 0;
+                                int low = 3; //assume lowest valid port is 3 given assumption of 2 hosts max per switch
+                                int high = maxport;
+                                randport = (rand_r(&seed) % (high - low + 1)) + low; //select random port between [low,high]
+
+                                //out_port will be randport if randport > 0 and not equal to the input port, else send to maxport
+                                ofp_port_t out_port = (randport > 0 && randport != (int) ctx->xin->flow.in_port.ofp_port) ? randport : maxport;
+
+                                VLOG_ERR("syn acks stuff caught by split flow sending through normally on port: %d",(int) out_port);
+                                send_pkt_to_port(out_port, ctx->xin->ofproto, rubbishpkt);
+                                break;
+                            }
+
                         }
 
                         else
                         {
-                            compose_split_tcp(ctx);
+                            //int maxport = getmaxport(ctx->xin->ofproto);
+                            //VLOG_ERR("MAXPORT IS: %d", maxport);
+                            compose_split_tcp(ctx, port);
+
                         }
 
                     }
                     if(ctx->xin->flow.nw_proto == 17)
                     {
-                        compose_split(ctx);
+                        compose_split(ctx, port);
                     }
                     //break;
                 }
