@@ -5436,7 +5436,7 @@ create_custom_packet(struct dp_packet *temp_pkt_for_flow, void *data, size_t siz
     flow_extract(temp_pkt_for_flow, &flow); //copy flow from temp_pkt_for_flow to build a new packet with the same flow
     //use the flow to build a new packet with aggregation of packets as it's udp_paylaod
     flow_compose(packetAggr, &flow, data, size_data);
-
+    //free(data);
     return packetAggr;
 
 }
@@ -5964,40 +5964,35 @@ static char *
 reassemble_message(struct my_split_packet *msp)
 {
     VLOG_ERR("tot splits: %d, sizepayload %d", msp[0].tot_splits, msp[0].sizeofpayload);
-    char *temp_payload = (char*) malloc(sizeof(char) * msp[0].sizeofpayload+1);//malloc(msp[0].sizeofpayload);//[msp[0].sizeofpayload];
+    char *temp_payload = (char*) malloc(sizeof(char) * msp[0].sizeofpayload + 1);//malloc(msp[0].sizeofpayload);//[msp[0].sizeofpayload];
     temp_payload[0] = '\0'; //clear temp payload
+    int len = 0;
     for(int i=0; i < msp[0].tot_splits; i++)
     {
-        //VLOG_ERR("structure of packet %s ", ofp_dp_packet_to_string(msp[0].packet));
         int size_split = dp_packet_l4_size(msp[i].packet) - UDP_HEADER_LEN;
-        //int actual_split_size = strlen((char *) dp_packet_get_udp_payload(msp[i].packet));
-        VLOG_INFO("split %.*s, and size_split: %d",size_split,(char *) dp_packet_get_udp_payload(msp[i].packet), size_split);
-        strncat(temp_payload, (char *) dp_packet_get_udp_payload(msp[i].packet), size_split);
-        //temp_payload[size_split-1] = '\0';
-        //size_split = 0;
+        //VLOG_INFO("split %.*s, and size_split: %d",size_split,(char *) dp_packet_get_udp_payload(msp[i].packet), size_split);
+        //strncat(temp_payload, (char *) dp_packet_get_udp_payload(msp[i].packet), size_split); //this worked fine however with memcpy like in the tcp case, is better if we have payloads containing random null character
+        memcpy(temp_payload + len, dp_packet_get_udp_payload(msp[i].packet),size_split);
+        len += size_split;
     }
-    //temp_payload[msp[0].sizeofpayload] = '\0';
     VLOG_ERR("sto mandando questo %.*s ",msp[0].sizeofpayload,temp_payload);
     return temp_payload;
 }
-//static char *temp_payload_reass;
 
 static char *
 reassemble_tcp_message(struct my_tcp_split_packet *msp1)
 {
-    VLOG_ERR("tot splits: %d, sizepayload %"PRIu32, msp1[0].tot_splits, msp1[0].sizeofpayload);
-    char *temp_payload_reass = (char*) malloc(sizeof(char) * msp1[0].sizeofpayload + 1);//doesn't matter which index i pick sizepayload is the same for each split of the same packet
-    temp_payload_reass[0] = '\0'; //clear temp payload
+    VLOG_ERR("tot splits: %d, sizepayload %u", msp1[0].tot_splits, msp1[0].sizeofpayload);
+    char *temp_payload_reass = malloc(sizeof(char) * msp1[0].sizeofpayload + 1);
+    temp_payload_reass[0] = '\0';
+    int len =0;
+    //add splits one by one with memcpy since encrypted payloads often contain '\0' in between the payload and with strncat it would stop prematurely
     for(int i=0; i < msp1[0].tot_splits; i++)
     {
-        //VLOG_ERR("structure of packet %s ", ofp_dp_packet_to_string(msp1[0].packet));
-        uint32_t size_split = tcp_payload_length(msp1[i].packet);//dp_packet_l4_size(msp[i].packet) - UDP_HEADER_LEN;
-        VLOG_INFO("split %.*s, and size_split: %"PRIu32,size_split,(char *) dp_packet_get_udp_payload(msp1[i].packet), size_split);
-        strncat(temp_payload_reass, (char *) dp_packet_get_tcp_payload(msp1[i].packet), size_split);
-
+        memcpy(temp_payload_reass + len, dp_packet_get_tcp_payload(msp1[i].packet),tcp_payload_length(msp1[i].packet));
+        len += tcp_payload_length(msp1[i].packet);
     }
-    //temp_payload[msp[0].tot_splits] = '\0';
-    VLOG_ERR("sto mandando questo %.*s ",msp1[0].sizeofpayload,temp_payload_reass);
+
     return temp_payload_reass;
 }
 
@@ -6043,7 +6038,8 @@ static uint32_t *
 generate_tcp_rand_split_array(struct dp_packet *packet_to_split)
 {
     uint32_t rem = tcp_payload_length(packet_to_split); //starts as actual complete payload size, is decreased as splitting occurs
-    uint32_t *split_arr = malloc(rem * sizeof(uint32_t));//this array will contain the random lengths of splits we'll apply to the payload,
+    uint32_t *split_arr = (uint32_t*)malloc(rem * sizeof(uint32_t));//this array will contain the random lengths of splits we'll apply to the payload,
+    //split_arr[0]='\0';
     // since we don't know how many splits we set the length of the array to the size of the payload
     int indexsplit = 0; //index to iterate over split_arr
     /* while length of original packet is > 0, keep splitting by a random number from 1 -> rem */
@@ -6063,6 +6059,8 @@ generate_tcp_rand_split_array(struct dp_packet *packet_to_split)
         indexsplit++; //increase index of iteration
 
     }
+    //there are usually empty spots in splitarr
+
     return split_arr;
 
 
@@ -6075,35 +6073,32 @@ compose_split_tcp(struct xlate_ctx *ctx)
 {
     struct eth_addr fake_mac = ETH_ADDR_C(44,34,56,78,9a,bc);
     struct eth_header *eth_pre_split = dp_packet_eth(ctx->xin->packet); //take ethernet header of incoming packet
-    //free(temp_payload_reass);
+
     if(!eth_addr_equals(eth_pre_split->eth_src, fake_mac))
     {
         struct dp_packet *packet_to_split = dp_packet_clone(ctx->xin->packet); //clone incoming packet
-        //put_drop_action(ctx->xin->odp_actions, ctx.error);
+
         char *complete_payload = (char *) dp_packet_get_tcp_payload(packet_to_split);
         uint32_t truepayloadsize =  tcp_payload_length(packet_to_split);
-
-        VLOG_ERR("incoming packet w/payload size %u to split: %.*s", truepayloadsize, truepayloadsize, complete_payload);
 
         VLOG_ERR("incoming packet : %s",ofp_dp_packet_to_string(packet_to_split));
         tcpcountsplits = 0; //zero out static split counter before creating new value
         uint32_t *split_arr = generate_tcp_rand_split_array(packet_to_split);
-
+        VLOG_ERR("tcpcountsplits: %d", tcpcountsplits);
         //create #tcpcountsplits packets with parts of original payload and send them through random ports
         int prev = 0;
         int sequence = 0;
         for(int i = 0; i < tcpcountsplits; i++)
         {
-            VLOG_ERR("split_arr[i] %"PRIu32, split_arr[i]); //the length of split i
-            if(split_arr[i] == 0) break; //exit loop since no more splits are available
+            VLOG_ERR("split_arr[i] %u", split_arr[i]); //the length of split i
+            //if(split_arr[i] == 0) break; //exit loop since no more splits are available
 
-            char *temp_payload = malloc(sizeof(char *) * split_arr[i]);
+            char *temp_payload = malloc(sizeof(char *) * split_arr[i] + 1);
             temp_payload[0] ='\0';
-            strncat(temp_payload, &complete_payload[prev], split_arr[i]);
-            //temp_payload[split_arr[i]] = '\0'; //add end of line
-            //if(temp_payload[split_arr[i]] != '\0')  temp_payload[split_arr[i]] = '\0';
+            memcpy(temp_payload, &complete_payload[prev], split_arr[i]); //was strncat
+            //temp_payload[split_arr[i]] = '\0'; //don't need this we have the original packet including last carriage return
 
-            VLOG_ERR("What I'm copying in split packet %s -", temp_payload);
+            VLOG_ERR("What I'm copying in split packet %.*s -",(int) split_arr[i], temp_payload);
 
 
             /* initialize and fill my_split_packet struct */
@@ -6123,6 +6118,8 @@ compose_split_tcp(struct xlate_ctx *ctx)
             s_pkt.tcp_urg = tcph->tcp_urg;
 
             struct dp_packet *pkt_to_send = create_custom_packet(packet_to_split, &s_pkt, sizeof s_pkt); // the packet i'm actually sending containing the split
+
+
             // packet and other info useful to reassemble later
 
             /* this modifies the packet info but somehow the flows don't match on dl_src or dst POSSIBLE BUG HERE nothing too serious */
@@ -6136,19 +6133,20 @@ compose_split_tcp(struct xlate_ctx *ctx)
             ovs_16aligned_be32 netip;
             put_16aligned_be32(&netip, ip);
             iph->ip_dst = netip;
+
             /* STUFF TO DO
              * test this
             */
-
             int maxport = getmaxport(ctx->xin->ofproto);
             int randport = 0;
             if (maxport < 2)
             {
                 randport = 1;
             }
-            if(maxport == 2)
+            if(maxport == 2 || maxport == 4 || maxport == 7)
             {
-                randport = 1; //for testing purposes turn to 1 else 2
+                VLOG_ERR("PORT SHENANIGANS");
+                randport = 2; //for testing purposes turn to 1 else 2
             }
             else if (maxport > 2)
             {
@@ -6161,7 +6159,7 @@ compose_split_tcp(struct xlate_ctx *ctx)
 
             ofp_port_t out_port = (randport > 0 && randport != (int) ctx->xin->flow.in_port.ofp_port) ? randport : maxport;
 
-            VLOG_ERR("sending split out of random port %d", (int) out_port);
+            //VLOG_ERR("sending split out of random port %d", (int) out_port);
             int err_sendsplit = send_pkt_to_port(out_port, ctx->xin->ofproto, pkt_to_send);
 
             if(err_sendsplit  == 0)
@@ -6205,11 +6203,10 @@ compose_split(struct xlate_ctx *ctx)
         VLOG_ERR("split_arr[i] %d", split_arr[i]); //the length of split i
         if(split_arr[i] == 0) break; //exit loop since no more splits are available
 
-        char *temp_payload = malloc(sizeof(char *) * split_arr[i]);//char temp_payload[split_arr[i]];
+        char *temp_payload = malloc(sizeof(char *) * split_arr[i] + 1);//char temp_payload[split_arr[i]];
         temp_payload[0] ='\0';
-        strncat(temp_payload, &complete_payload[prev], split_arr[i]);
-        //if(temp_payload[split_arr[i]] != '\0')  temp_payload[split_arr[i]] = '\0';
-        //temp_payload[split_arr[i]] = '\0';
+        memcpy(temp_payload, &complete_payload[prev], split_arr[i]);
+        //temp_payload[split_arr[i]] = '\0'; //don't need this we have the original packet including last carriage return
         //add end of line
 
         VLOG_ERR("What I'm copying in split packet %s -", temp_payload);
@@ -6317,18 +6314,12 @@ compose_reass(struct xlate_ctx *ctx)
             //VLOG_ERR("check if array is initialized to 0, printing arrived: %d",hold_to_rebuild[0].arrived);
             if( hold_to_rebuild[i_csum].arrived == s_pkt.tot_splits )
             {
-
-
                 VLOG_ERR("all frames have been received reassembling everything and sending packet");
-
                 char *reass_payload = reassemble_message(hold_to_rebuild[i_csum].to_reassemble); //assemble all packets in given array to recreate original payload
 
-                VLOG_INFO("strlen of reass : %ld  sizeofpayload: %d, the payload: %s",  strlen(reass_payload), s_pkt.sizeofpayload,reass_payload);
+                //VLOG_INFO("strlen of reass : %ld  sizeofpayload: %d, the payload: %s",  strlen(reass_payload), s_pkt.sizeofpayload,reass_payload);
                 /* create packet to send containing reassembled packet */
                 struct dp_packet *temp_packet = create_custom_packet(hold_to_rebuild[i_csum].to_reassemble[0].packet, reass_payload, s_pkt.sizeofpayload);
-
-                //VLOG_ERR("reassembled packet %s", ofp_dp_packet_to_string(temp_packet));
-                //VLOG_ERR("paylaod of pkt to be resubbed %.*s",s_pkt.sizeofpayload, (char *) dp_packet_get_udp_payload(temp_packet));
 
                 int err_resub_split = resubmit_to_table(ctx, temp_packet); //sumbit reassembled packet to flow table so it can be directed to correct destination host
                 if(err_resub_split  == 0)
@@ -6336,13 +6327,13 @@ compose_reass(struct xlate_ctx *ctx)
                     VLOG_ERR("Reaggregated packet resubmitted to flow table successfully ...\nfreeing space at that index ...\nupdating counters ...");
                 }
                 else VLOG_ERR("Error in reaggregated packet resubmission to flow table %d", err_resub_split);
-
+                free(reass_payload);
                 //dp_packet_delete(temp_packet);
                 /* update counters, don't know if this works as zeroing that element of array but it should */
                 hold_to_rebuild[i_csum].csumkey = 0;
                 hold_to_rebuild[i_csum].arrived = 0;
                 free(hold_to_rebuild[i_csum].to_reassemble);//hold_to_rebuild[i_csum].to_reassemble = NULL;
-                free(reass_payload);
+
                 //dp_packet_delete(temp_packet);
 
                 i_removed = i_csum; //set i_removed to i_csum, meaning we can place a totally new packet starting from this index
@@ -6412,11 +6403,9 @@ compose_reass_tcp(struct xlate_ctx *ctx)
                 char *reass_payload_tcp = reassemble_tcp_message(tcp_hold_to_rebuild[i_csum].to_reassemble); //assemble all packets in given array to recreate original payload
                 //
 
-                /* create packet to send containing reassembled packet, index of to_reassemble doesn't matter, extracted flows will all be the same
-                 *
-                 *
-                 * AOOOO QUA REASS_PAYLOAD_TCP ERA SENZA & E SOPRA AGGIUNGERE * AL NOME DELLA VARIABILE E RIMETTERE FREE*/
+                //char *chekapay = (char *) dp_packet_get_tcp_payload(split_recvd);
                 struct dp_packet *temp_packet = create_custom_packet(tcp_hold_to_rebuild[i_csum].to_reassemble[0].packet, reass_payload_tcp, s_pkt.sizeofpayload);
+
                 struct tcp_header *tcph = dp_packet_l4(temp_packet);
                 tcph->tcp_seq = tcp_hold_to_rebuild[i_csum].to_reassemble[0].tcp_seq;
                 tcph->tcp_ack = tcp_hold_to_rebuild[i_csum].to_reassemble[0].tcp_ack;
@@ -6424,26 +6413,26 @@ compose_reass_tcp(struct xlate_ctx *ctx)
                 tcph->tcp_winsz = tcp_hold_to_rebuild[i_csum].to_reassemble[0].tcp_winsz;
                 tcph->tcp_csum = tcp_hold_to_rebuild[i_csum].to_reassemble[0].tcp_csum;
                 tcph->tcp_urg = tcp_hold_to_rebuild[i_csum].to_reassemble[0].tcp_urg;
-
-                VLOG_INFO("reassembled packet %s", ofp_dp_packet_to_string(temp_packet));
+                //free(reass_payload_tcp);
+                //VLOG_INFO("reassembled packet %s", ofp_dp_packet_to_string(temp_packet));
 
 
                 int err_resub_split = resubmit_to_table(ctx, temp_packet); //sumbit reassembled packet to flow table so it can be directed to correct destination host
                 if(err_resub_split  == 0)
                 {
                     VLOG_ERR("Reaggregated packet resubmitted to flow table successfully ...\nfreeing space at that index ...\nupdating counters ...");
-                    //free(reass_payload);
                 }
                 else VLOG_ERR("Error in reaggregated packet resubmission to flow table %d", err_resub_split);
-
+                free(reass_payload_tcp);
 
                 /* update counters, don't know if this works as zeroing that element of array but it should */
                 tcp_hold_to_rebuild[i_csum].csumkey = 0;
                 tcp_hold_to_rebuild[i_csum].arrived = 0;
-                free(tcp_hold_to_rebuild[i_tcpremoved].to_reassemble);//tcp_hold_to_rebuild[i_csum].to_reassemble = NULL;
 
+                free(tcp_hold_to_rebuild[i_csum].to_reassemble);//tcp_hold_to_rebuild[i_csum].to_reassemble = NULL;
+                //free(reass_payload_tcp);
                 //dp_packet_delete(temp_packet); //added later
-                free(reass_payload_tcp);
+
 
                 i_tcpremoved = i_csum; //set i_removed to i_csum, meaning we can place a totally new packet starting from this index
                 tcp_pkts_to_rebuild--; //if i send a packet also decrease packets contained in hold_to_rebuild dictionary
@@ -8377,11 +8366,12 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
                     struct tcp_header *tcph = dp_packet_l4(packet);
                     uint32_t len = tcp_payload_length(packet);
                     int flags = TCP_FLAGS(tcph->tcp_ctl);
+                    char *truepay = (char *) dp_packet_get_tcp_payload(packet);
                     if(ctx->xin->flow.nw_proto == 6) //if buffer of packets with given flowid exists
                     {
                         VLOG_ERR("there are: %d TCP spots taken in array dict", flows_in_dict_tcp);
                         int fl_entry_index_tcp = check_flow_exists_tcp(my_flow_dict_tcp, aggrs->flowid);
-                        if(len == 0 || flags == 25)
+                        if(len == 0 || flags == 25 || truepay[0] == 22)
                         {
                             VLOG_ERR("structure of ack packet sending through: %s ",  ofp_dp_packet_to_string(packet));
                             //VLOG_INFO("syn,ack,syn-ack or fin-psh-ack caught, sending through without aggregation");
@@ -8523,20 +8513,22 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
                     {
                         struct dp_packet *rubbishpkt = dp_packet_clone(ctx->xin->packet);
                         struct tcp_header *tcph = dp_packet_l4(rubbishpkt);
-                        if(tcp_payload_length(rubbishpkt) == 0 || TCP_FLAGS(tcph->tcp_ctl) == 25)
+                        char *truepay = (char *) dp_packet_get_tcp_payload(rubbishpkt);
+                        //uint32_t size_p = tcp_payload_length(rubbishpkt);
+                        if(tcp_payload_length(rubbishpkt) == 0 || TCP_FLAGS(tcph->tcp_ctl) == 25 || truepay[0] == 22 || truepay[0] == 20) //20 change cipher spec, 22 all handhsake stuff, dec to hex to understand what flags are
                         {
                             int maxport = getmaxport(ctx->xin->ofproto);
-                            //VLOG_ERR("maxport before if %d", maxport);
-                            //if(maxport == 2 || maxport == 4) //needed to collect data on splittopo.py
-                            //{
-                               //maxport = 2;
-                           // }
+                            VLOG_ERR("maxport before if %d", maxport);
+                            if(maxport == 2 || maxport == 4 || maxport == 7) //needed to collect data on splittopo.py
+                            {
+                               maxport = 2;
+                            }
                             //VLOG_ERR("maxport %d", maxport);
                             VLOG_ERR("syn acks stuff caught by split flow sending through normally on port: %d", maxport);
                             send_pkt_to_port((ofp_port_t) maxport, ctx->xin->ofproto, rubbishpkt);
                             break;
                         }
-                            //if(ctx->xin->flow.)
+
                         else
                         {
                             compose_split_tcp(ctx);
@@ -8553,12 +8545,15 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
 
 
             }
-            case OFPACT_REASS: {
+            case OFPACT_REASS:
+            {
                 ctx->xout->slow |= SLOW_ACTION;
 
                 if (ctx->xin->packet)
                 {
                     //VLOG_ERR("max port plus 1: %"PRIu16, ctx->xin->ofproto->up.alloc_port_no);
+                    //struct dp_packet *rubbishpkt = dp_packet_clone(ctx->xin->packet);
+                    //struct tcp_header *tcph = dp_packet_l4(rubbishpkt);
                     if (ctx->xin->flow.nw_proto == 6)
                     {
                         compose_reass_tcp(ctx);
