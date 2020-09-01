@@ -1150,6 +1150,7 @@ struct ofpact_deaggr{
 struct ofpact_split{
     OFPACT_PADDED_MEMBERS(
         struct ofpact ofpact;
+        uint16_t port;
 
     );
 };

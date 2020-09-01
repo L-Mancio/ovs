@@ -361,7 +361,7 @@ enum ofp_raw_action_type {
     /* OF1.0+(81): void. */
     OFPAT_RAW_DEAGGR, //not ofp_port_t
 
-    /* OF1.0+(82): void. */
+    /* OF1.0+(82): uint16_t. */
     OFPAT_RAW_SPLIT,
 
     /* OF1.0+(83): void. */
@@ -7877,40 +7877,49 @@ check_AGGRS(const struct ofpact_aggrs *aggrs OVS_UNUSED,
     return 0;
 }
 ////// split translation
+/*
+struct ofp_action_split {
+    ovs_be16 type;
+    ovs_be16 len;
+    ovs_be16 port;
+};
+*/
+//OFP_ASSERT(sizeof(struct ofp_action_split) == 8);
 static void
-encode_SPLIT(const struct ofpact_split *split OVS_UNUSED,
+encode_SPLIT(const struct ofpact_split *split,
               enum ofp_version ofp_version OVS_UNUSED,
-              struct ofpbuf *out OVS_UNUSED)
+              struct ofpbuf *out)
 {
 
     printf("some split encoding stuff \n");
-    put_OFPAT_SPLIT(out);
+    put_OFPAT_SPLIT(out, split->port);
 }
 static enum ofperr
-decode_OFPAT_RAW_SPLIT(struct ofpbuf *out)
+decode_OFPAT_RAW_SPLIT(uint16_t port, enum ofp_version ofp_version OVS_UNUSED,
+                        struct ofpbuf *out)
 {
 
     printf("some split decoding stuff \n");
-    ofpact_put_SPLIT(out);
+    ofpact_put_SPLIT(out)->port = port;
 
     return 0;
 }
 static char * OVS_WARN_UNUSED_RESULT
 parse_SPLIT(char *arg, const struct ofpact_parse_params *pp) //
 {
-
+    //uint16_t port;
     printf("some split parsing stuff %s\n", arg);
-    ofpact_put_SPLIT(pp->ofpacts);
+    //ofpact_put_SPLIT(pp->ofpacts);
+    return str_to_u16(arg,"port for split", &ofpact_put_SPLIT(pp->ofpacts)->port);
+    //return NULL;
 
-    return NULL;
-    //return parse_deaggr(arg, pp->ofpacts);
 }
 static void
-format_SPLIT(const struct ofpact_split *split OVS_UNUSED,
+format_SPLIT(const struct ofpact_split *split ,
               const struct ofpact_format_params *fp)
 {
     printf("some split formatting stuff \n");
-    ds_put_format(fp->s, "%ssplit%s", colors.value, colors.end);
+    ds_put_format(fp->s, "split:%"PRIu16,split->port);
 
 }
 static enum ofperr
