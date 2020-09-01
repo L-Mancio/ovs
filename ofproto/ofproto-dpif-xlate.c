@@ -5516,6 +5516,7 @@ static void
 
         /* dictionary cleanup */
         clear_packetBuff(args->dict_entry->dp_packet_buff1);
+        dp_packet_delete(packetAggr);
         args->dict_entry->flow_id = 0;
         index_for_dict = args->flow_entry_index;
         flows_in_dict--;
@@ -5569,7 +5570,7 @@ static void
 
         /* dictionary cleanup */
         clear_packetBuff_tcp(args->dict_entry->dp_packet_buff1);
-
+        dp_packet_delete(packetAggr);
         args->dict_entry->flow_id = 0;
         index_for_dict_tcp =  args->flow_entry_index;
         flows_in_dict_tcp--;
@@ -5644,7 +5645,6 @@ compose_aggrs_action(struct xlate_ctx *ctx, struct dp_packet *packet_to_store,st
         dict_entry->dp_packet_buff1[dict_entry->index].sizeofpayload = dp_packet_l4_size(ctx->xin->packet) - UDP_HEADER_LEN;
 
         //int s = dp_packet_l4_size(ctx->xin->packet) - UDP_HEADER_LEN;
-
         //VLOG_ERR("preparing packet:  %.*s",s, (char *) dp_packet_get_udp_payload(dict_entry->dp_packet_buff1[dict_entry->index].packet)); //print payload taking into account its size otherwise weird overlap occurs
         dict_entry->index++;
 
@@ -5677,7 +5677,7 @@ compose_aggrs_action(struct xlate_ctx *ctx, struct dp_packet *packet_to_store,st
 
         if(err_send == 0) VLOG_ERR("Packet aggregation sent correctly since buffer reached full capacity!");
         else VLOG_ERR("Error in packet aggregation delivery %d", err_send);
-
+        dp_packet_delete(packetAggr);
         //VLOG_ERR("deleting buffer, zeroing flow_id and index of flow %d:", my_flow_dict[index_for_dict].flow_id);
 
         clear_packetBuff(dict_entry->dp_packet_buff1);
@@ -5741,6 +5741,7 @@ compose_aggrs_action_tcp(struct xlate_ctx *ctx,struct dp_packet *packet_to_store
         //VLOG_ERR("mysizeof dp_packet_buff %ld: ", PACKET_BUFF_ELEMENTS * sizeof(struct my_captured_packet_tcp));
 
         clear_packetBuff_tcp(dict_entry->dp_packet_buff1);
+        dp_packet_delete(packetAggr);
         //free(dict_entry->dp_packet_buff1);
         dict_entry->flow_id = 0;
         index_for_dict_tcp =  flow_entry_index;
@@ -6165,9 +6166,9 @@ compose_split_tcp(struct xlate_ctx *ctx, uint16_t port)
             prev += split_arr[i]; //shift index of payload we are splitting to cut off the part we just split
             sequence++; //increase sequence number to reassemble packets in order at destination
             free(temp_payload);//memset(temp_payload, 0, split_arr[i]); //delete split string holder
-
+            dp_packet_delete(pkt_to_send);//added later
         }
-        //dp_packet_delete(packet_to_split);
+        dp_packet_delete(packet_to_split);
         free(split_arr);
 
     }
@@ -6263,9 +6264,10 @@ compose_split(struct xlate_ctx *ctx, uint16_t port)
         prev += split_arr[i]; //shift index of payload we are splitting to cut off the part we just split
         sequence++; //increase sequence nuymber to allign
         free(temp_payload);//memset(temp_payload, 0, split_arr[i]); //delete split string holder
-
+        dp_packet_delete(pkt_to_send);
     }
     free(split_arr);
+    dp_packet_delete(packet_to_split);
 
 
 
@@ -6314,7 +6316,7 @@ compose_reass(struct xlate_ctx *ctx)
                 }
                 else VLOG_ERR("Error in reaggregated packet resubmission to flow table %d", err_resub_split);
                 free(reass_payload);
-                //dp_packet_delete(temp_packet);
+                dp_packet_delete(temp_packet);
                 /* update counters, don't know if this works as zeroing that element of array but it should */
                 hold_to_rebuild[i_csum].csumkey = 0;
                 hold_to_rebuild[i_csum].arrived = 0;
@@ -6410,6 +6412,7 @@ compose_reass_tcp(struct xlate_ctx *ctx)
                 }
                 else VLOG_ERR("Error in reaggregated packet resubmission to flow table %d", err_resub_split);
                 free(reass_payload_tcp);
+                dp_packet_delete(temp_packet);
 
                 /* update counters, don't know if this works as zeroing that element of array but it should */
                 tcp_hold_to_rebuild[i_csum].csumkey = 0;
@@ -6451,6 +6454,7 @@ compose_reass_tcp(struct xlate_ctx *ctx)
 
             }
         }
+        dp_packet_delete(split_recvd);
     }
 }
 static void
@@ -8357,7 +8361,10 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
                     {
                         VLOG_ERR("there are: %d TCP spots taken in array dict", flows_in_dict_tcp);
                         int fl_entry_index_tcp = check_flow_exists_tcp(my_flow_dict_tcp, aggrs->flowid);
-                        if(len == 0 || flags == 25 || truepay[0] == 22 || truepay[0] == 20)
+
+                        ////flow normally: tls handshake(all messages),acks w/len 0, acks and psh|acks wlen 1420(reassembled pdus), rst
+                        if(len == 0 || flags == 25 || flags == 20 || truepay[0] == 22 || truepay[0] == 20
+                               || ((flags == 16 || flags ==24) && len == 1420))
                         {
                             VLOG_ERR("structure of ack packet sending through: %s ",  ofp_dp_packet_to_string(packet));
                             //VLOG_INFO("syn,ack,syn-ack or fin-psh-ack caught, sending through without aggregation");
@@ -8370,50 +8377,38 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
                         }
                         if(fl_entry_index_tcp == -1 && flows_in_dict_tcp < FLOWS_TO_HOLD && ctx->xin->flow.nw_proto == 6)
                         {
-                            //struct dp_packet *rubbishpkt = dp_packet_clone(ctx->xin->packet);
-                            //struct tcp_header *tcph = dp_packet_l4(rubbishpkt);
-                            if(len == 0 || flags == 25)
+
+                            VLOG_ERR("new TCP flow that requires aggregation found with flowid: %d"
+                                     "creating entry in dictionary...", aggrs->flowid);
+                            while(my_flow_dict_tcp[index_for_dict_tcp].flow_id !=0 && index_for_dict_tcp < FLOWS_TO_HOLD )
                             {
-                                VLOG_ERR("structure of ack packet sending through: %s ",  ofp_dp_packet_to_string(packet));
-                                //VLOG_ERR("syn acks stuff sending through on port %d", (int) aggrs->port);
-                                send_pkt_to_port(u16_to_ofp(aggrs->port), ctx->xin->ofproto, packet);
-                                break;
+                                VLOG_ERR("looking for first available space in dictionary of flows ...");
+                                index_for_dict_tcp++;
+                            }
+                            if(index_for_dict_tcp >= FLOWS_TO_HOLD)
+                            {
+                                VLOG_ERR("TCP dictionary of flows full, check FLOWS_TO_HOLD number of flows ...\n"
+                                         "maybe consider splitting instead");
                             }
                             else
                             {
-                                VLOG_ERR("new TCP flow that requires aggregation found with flowid: %d"
-                                         "creating entry in dictionary...", aggrs->flowid);
-                                while(my_flow_dict_tcp[index_for_dict_tcp].flow_id !=0 && index_for_dict_tcp < FLOWS_TO_HOLD )
-                                {
-                                    VLOG_ERR("looking for first available space in dictionary of flows ...");
-                                    index_for_dict_tcp++;
-                                }
-                                if(index_for_dict_tcp >= FLOWS_TO_HOLD)
-                                {
-                                    VLOG_ERR("TCP dictionary of flows full, check FLOWS_TO_HOLD number of flows ...\n"
-                                             "maybe consider splitting instead");
-                                }
-                                else
-                                {
-                                    VLOG_ERR("placing first TCP packet in the array at dict index: %d", index_for_dict_tcp);
-                                    my_flow_dict_tcp[index_for_dict_tcp].flow_id = aggrs->flowid;
-                                    //hold_to_rebuild[i_removed].to_reassemble = malloc(s_pkt.tot_splits * sizeof(struct my_split_packet));
-                                    my_flow_dict_tcp[index_for_dict_tcp].index = 0;
-                                    //my_flow_dict[index_for_dict].buffer_full = false;
-                                    flows_in_dict_tcp++;
-                                    //thread stuff, including initializing arugments thread needs in order to send the buffer prematurely if timer ends
-                                    my_flow_dict_tcp[index_for_dict_tcp].argsForThread.timerstop = false;
-                                    my_flow_dict_tcp[index_for_dict_tcp].argsForThread.flow_entry_index = index_for_dict_tcp;
-                                    my_flow_dict_tcp[index_for_dict_tcp].argsForThread.dict_entry = &my_flow_dict_tcp[index_for_dict_tcp];
-                                    my_flow_dict_tcp[index_for_dict_tcp].argsForThread.aggrs = aggrs;
-                                    my_flow_dict_tcp[index_for_dict_tcp].argsForThread.ofproto = ctx->xin->ofproto;
-                                    pthread_create(&my_flow_dict_tcp[index_for_dict_tcp].tid, NULL, threadproc_tcp,  (void *)&my_flow_dict_tcp[index_for_dict_tcp].argsForThread);
-                                    //VLOG_ERR("entered compose tcp");
-                                    compose_aggrs_action_tcp(ctx, packet, aggrs, &my_flow_dict_tcp[index_for_dict_tcp], index_for_dict_tcp);
+                                VLOG_ERR("placing first TCP packet in the array at dict index: %d", index_for_dict_tcp);
+                                my_flow_dict_tcp[index_for_dict_tcp].flow_id = aggrs->flowid;
+                                //hold_to_rebuild[i_removed].to_reassemble = malloc(s_pkt.tot_splits * sizeof(struct my_split_packet));
+                                my_flow_dict_tcp[index_for_dict_tcp].index = 0;
+                                //my_flow_dict[index_for_dict].buffer_full = false;
+                                flows_in_dict_tcp++;
+                                //thread stuff, including initializing arugments thread needs in order to send the buffer prematurely if timer ends
+                                my_flow_dict_tcp[index_for_dict_tcp].argsForThread.timerstop = false;
+                                my_flow_dict_tcp[index_for_dict_tcp].argsForThread.flow_entry_index = index_for_dict_tcp;
+                                my_flow_dict_tcp[index_for_dict_tcp].argsForThread.dict_entry = &my_flow_dict_tcp[index_for_dict_tcp];
+                                my_flow_dict_tcp[index_for_dict_tcp].argsForThread.aggrs = aggrs;
+                                my_flow_dict_tcp[index_for_dict_tcp].argsForThread.ofproto = ctx->xin->ofproto;
+                                pthread_create(&my_flow_dict_tcp[index_for_dict_tcp].tid, NULL, threadproc_tcp,  (void *)&my_flow_dict_tcp[index_for_dict_tcp].argsForThread);
+                                //VLOG_ERR("entered compose tcp");
+                                compose_aggrs_action_tcp(ctx, packet, aggrs, &my_flow_dict_tcp[index_for_dict_tcp], index_for_dict_tcp);
 
-                                }
                             }
-
 
                         }
 
@@ -8476,9 +8471,6 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
 
                 if(ctx->xin->flow.nw_proto == 6)
                 {
-                    //struct dp_packet *rubbishpkt = dp_packet_clone(ctx->xin->packet);
-                    //if(tcp_payload_length(rubbishpkt) == 0) break;
-                    //else
                     compose_deaggr_tcp(ctx);
                 }
                 if(ctx->xin->flow.nw_proto == 17)
@@ -8499,16 +8491,20 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
                 {
                     if(ctx->xin->flow.nw_proto == 6)
                     {
-                        struct dp_packet *rubbishpkt = dp_packet_clone(ctx->xin->packet);
-                        struct tcp_header *tcph = dp_packet_l4(rubbishpkt);
-                        char *truepay = (char *) dp_packet_get_tcp_payload(rubbishpkt);
+                        struct dp_packet *packet = dp_packet_clone(ctx->xin->packet);
+                        uint32_t len = tcp_payload_length(packet);
+                        struct tcp_header *tcph = dp_packet_l4(packet);
+                        int flags = TCP_FLAGS(tcph->tcp_ctl);
+                        char *truepay = (char *) dp_packet_get_tcp_payload(packet);
 
-                        if(tcp_payload_length(rubbishpkt) == 0 || TCP_FLAGS(tcph->tcp_ctl) == 25 || truepay[0] == 22 || truepay[0] == 20) //20 change cipher spec, 22 all handhsake stuff, dec to hex to understand what flags are
+                        //flow normally: tls handshake(all messages),acks w/len 0, acks and psh|acks w/len 1420(reassembled pdu), rst
+                        if(len == 0 || flags == 25 || flags == 20 || truepay[0] == 22 || truepay[0] == 20
+                                                || ((flags == 16 || flags == 24)  && len == 1420))
                         {
                             if(port != 0)
                             {
                                 VLOG_ERR("syn acks stuff caught by split flow sending through normally on port: %u", port);
-                                send_pkt_to_port((ofp_port_t) port, ctx->xin->ofproto, rubbishpkt);
+                                send_pkt_to_port((ofp_port_t) port, ctx->xin->ofproto, packet);
                                 break;
                             }
                             if(port == 0)
@@ -8525,7 +8521,7 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
                                 ofp_port_t out_port = (randport > 0 && randport != (int) ctx->xin->flow.in_port.ofp_port) ? randport : maxport;
 
                                 VLOG_ERR("syn acks stuff caught by split flow sending through normally on port: %d",(int) out_port);
-                                send_pkt_to_port(out_port, ctx->xin->ofproto, rubbishpkt);
+                                send_pkt_to_port(out_port, ctx->xin->ofproto, packet);
                                 break;
                             }
 
@@ -8533,10 +8529,7 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
 
                         else
                         {
-                            //int maxport = getmaxport(ctx->xin->ofproto);
-                            //VLOG_ERR("MAXPORT IS: %d", maxport);
                             compose_split_tcp(ctx, port);
-
                         }
 
                     }
@@ -8556,9 +8549,7 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
 
                 if (ctx->xin->packet)
                 {
-                    //VLOG_ERR("max port plus 1: %"PRIu16, ctx->xin->ofproto->up.alloc_port_no);
-                    //struct dp_packet *rubbishpkt = dp_packet_clone(ctx->xin->packet);
-                    //struct tcp_header *tcph = dp_packet_l4(rubbishpkt);
+
                     if (ctx->xin->flow.nw_proto == 6)
                     {
                         compose_reass_tcp(ctx);
