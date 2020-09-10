@@ -5343,6 +5343,7 @@ struct flow_dict
     struct args_for_thread argsForThread;
     pthread_t tid;
 };
+
 struct flow_dict_tcp
 {
     int flow_id;
@@ -5421,8 +5422,9 @@ send_pkt_to_port(ofp_port_t outport, struct ofproto_dpif *ofproto, struct dp_pac
 
     return ofproto_dpif_send_packet(port, false, packet_to_send);
 }
+
 /*
- * Pretty self explanatory, creates a udp packet by extracting info from @temp_pkt_for_flow to create a flow, and populates new packet's udp payload with @data
+ * Pretty self explanatory, creates a udp or tcp packet by extracting info from @temp_pkt_for_flow to create a flow, and populates new packet's udp payload with @data
  * of size @size_data. Returns the packet, this function is used to create the packet aggregation and the packet splits
  */
 static struct dp_packet*
@@ -5434,9 +5436,10 @@ create_custom_packet(struct dp_packet *temp_pkt_for_flow, void *data, size_t siz
 
     struct flow flow; //create flow structure to copy flow of one of buffered packets
     flow_extract(temp_pkt_for_flow, &flow); //copy flow from temp_pkt_for_flow to build a new packet with the same flow
+
     //use the flow to build a new packet with aggregation of packets as it's udp_paylaod
     flow_compose(packetAggr, &flow, data, size_data);
-    //free(data);
+
     return packetAggr;
 
 }
@@ -5742,11 +5745,10 @@ compose_aggrs_action_tcp(struct xlate_ctx *ctx,struct dp_packet *packet_to_store
 
         clear_packetBuff_tcp(dict_entry->dp_packet_buff1);
         dp_packet_delete(packetAggr);
-        //free(dict_entry->dp_packet_buff1);
+
         dict_entry->flow_id = 0;
         index_for_dict_tcp =  flow_entry_index;
         flows_in_dict_tcp--;
-
 
     }
 
@@ -5890,17 +5892,7 @@ struct my_tcp_split_packet
     ovs_16aligned_be32 tcp_ack;
     ovs_be16 tcp_ctl;
     ovs_be16 tcp_winsz;
-
     ovs_be16 tcp_urg;
-    /*
-     * ovs_16aligned_be32 tcp_seq;
-        ovs_16aligned_be32 tcp_ack;
-        ovs_be16 tcp_ctl;
-        ovs_be16 tcp_winsz;
-        ovs_be16 tcp_csum;
-        ovs_be16 tcp_urg;
-     */
-
 };
 /*
  * struct used to create a pseudo-dictionary for splitting action,
@@ -6067,6 +6059,7 @@ generate_tcp_rand_split_array(struct dp_packet *packet_to_split)
 
 }
 
+//_Thread_local unsigned int tcpseed = time(NULL);
 
 /*split only works when max 2 hosts are attached to a single switch*/
 static void
@@ -6089,6 +6082,8 @@ compose_split_tcp(struct xlate_ctx *ctx, uint16_t port)
         //create #tcpcountsplits packets with parts of original payload and send them through random ports
         int prev = 0;
         int sequence = 0;
+        //unsigned int seed = -1;
+        unsigned int t = time(0);
         for(int i = 0; i < tcpcountsplits; i++)
         {
             VLOG_ERR("split_arr[i] %u", split_arr[i]); //the length of split i
@@ -6135,21 +6130,21 @@ compose_split_tcp(struct xlate_ctx *ctx, uint16_t port)
             put_16aligned_be32(&netip, ip);
             iph->ip_dst = netip;
 
-            /* STUFF TO DO
-             *
-            */
+
             int maxport = getmaxport(ctx->xin->ofproto);
             int randport = 0;
+            //unsigned int seed = -1;
+            VLOG_ERR("MAXPORT %d", maxport);
             if(port != 0)
             {
                 randport = port;
             }
             if(port == 0)
             {
-                unsigned int seed = 0;
+                //unsigned int seed = 0;
                 int low = 3; //assume lowest valid port is 3 given assumption of 2 hosts max per switch
                 int high = maxport;
-                randport = (rand_r(&seed) % (high - low + 1)) + low; //select random port between [low,high]
+                randport = (rand_r(&t) % (high - low + 1)) + low; //select random port between [low,high]
             }
             //out_port will be randport if randport > 0 and not equal to the input port, else send to maxport
             ofp_port_t out_port = (randport > 0 && randport != (int) ctx->xin->flow.in_port.ofp_port) ? randport : maxport;
@@ -6193,6 +6188,7 @@ compose_split(struct xlate_ctx *ctx, uint16_t port)
 
     int prev = 0;
     int sequence = 0;
+    unsigned int t = time(0);
     for(int i = 0; i < countsplits; i++)
     {
         VLOG_ERR("split_arr[i] %d", split_arr[i]); //the length of split i
@@ -6244,10 +6240,10 @@ compose_split(struct xlate_ctx *ctx, uint16_t port)
         }
         if(port == 0)
         {
-            unsigned int seed = 0;
+            //unsigned int seed = 0;
             int low = 3; //assume lowest valid port is 3 given assumption of 2 hosts max per switch
             int high = maxport;
-            randport = (rand_r(&seed) % (high - low + 1)) + low; //select random port between [low,high]
+            randport = (rand_r(&t) % (high - low + 1)) + low; //select random port between [low,high]
         }
         //out_port will be randport if randport > 0 and not equal to the input port, else send to maxport
         ofp_port_t out_port = (randport > 0 && randport != (int) ctx->xin->flow.in_port.ofp_port) ? randport : maxport;
@@ -8537,7 +8533,7 @@ do_xlate_actions(const struct ofpact *ofpacts, size_t ofpacts_len,
                     {
                         compose_split(ctx, port);
                     }
-                    //break;
+
                 }
                 break;
 

@@ -5931,7 +5931,7 @@ reassemble_tcp_message(struct my_tcp_split_packet *msp)
 {
     VLOG_ERR("tot splits: %d, sizepayload %"PRIu32, msp[0].tot_splits, msp[0].sizeofpayload);
     char *temp_payload_reass = (char*) malloc(sizeof(char) * msp[0].sizeofpayload);//doesn't matter which index i pick sizepayload is the same for each split of the same packet
-    temp_payload_reass[0] = '\0'; //clear temp payload
+    temp_payload_reass[0] = '\0'; //clear temp payload,
     for(int i=0; i < msp[0].tot_splits; i++)
     {
         //VLOG_ERR("structure of packet %s ", ofp_dp_packet_to_string(msp[0].packet));
@@ -5941,6 +5941,7 @@ reassemble_tcp_message(struct my_tcp_split_packet *msp)
     }
     //temp_payload[msp[0].tot_splits] = '\0';
     VLOG_ERR("sto mandando questo %s ",temp_payload_reass);
+
     return temp_payload_reass;
 }
 
@@ -6117,6 +6118,7 @@ compose_split_tcp(struct xlate_ctx *ctx)
                 VLOG_ERR("all tcp frames have been received, reassembling everything and sending packet");
                 //reass_payload = realloc(reass_payload, sizeof(char) * s_pkt.sizeofpayload);
                 char *reass_payload = reassemble_tcp_message(tcp_hold_to_rebuild[i_csum].to_reassemble); //assemble all packets in given array to recreate original payload
+
                 //
 
                 /* create packet to send containing reassembled packet, index of to_reassemble doesn't matter, extracted flows will all be the same*/

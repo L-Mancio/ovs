@@ -1133,7 +1133,7 @@ struct ofpact_aggrs{
     OFPACT_PADDED_MEMBERS(
         struct ofpact ofpact;
         uint16_t port;
-        uint16_t flowid; //int flowid
+        uint16_t flowid;
     );
 
 };

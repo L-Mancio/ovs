@@ -7794,7 +7794,7 @@ check_DEAGGR(const struct ofpact_deaggr *deaggr OVS_UNUSED,
     return 0;
 }
 
-////////////////////
+
 struct ofp_action_aggrs {
     ovs_be16 type;                    /* OFPAT_AGGRS. */
     ovs_be16 len;                     /*  8. */
@@ -7803,22 +7803,20 @@ struct ofp_action_aggrs {
 
 };
 OFP_ASSERT(sizeof(struct ofp_action_aggrs) == 8);
+
 static void
 encode_AGGRS(const struct ofpact_aggrs *aggrs,
              enum ofp_version ofp_version OVS_UNUSED,
              struct ofpbuf *out )
 {
-
     //VLOG_ERR("sizeof ofpact: %ld ", sizeof(struct ofp_action_aggrs));
     printf("some aggr encoding stuff \n");
     struct ofp_action_aggrs *o_aggrs;
     o_aggrs = put_OFPAT_AGGRS(out);
     o_aggrs->port = htons(aggrs->port);
     o_aggrs->fl_id = htons(aggrs->flowid);
-
-
-
 }
+
 static enum ofperr
 decode_OFPAT_RAW_AGGRS(const struct ofp_action_aggrs *o_aggrs,
                        enum ofp_version ofp_version OVS_UNUSED, // //uint16_t p, int fl,
@@ -7835,7 +7833,7 @@ decode_OFPAT_RAW_AGGRS(const struct ofp_action_aggrs *o_aggrs,
 }
 
 static char * OVS_WARN_UNUSED_RESULT
-parse_AGGRS(char *arg, const struct ofpact_parse_params *pp) //
+parse_AGGRS(char *arg, const struct ofpact_parse_params *pp)
 {
 
 
@@ -7844,20 +7842,18 @@ parse_AGGRS(char *arg, const struct ofpact_parse_params *pp) //
     char *error;
     char *error2;
 
-    //printf("arg from parse_AGGRS, should contain port and id: %s %s %s \n", &arg[0], &arg[1], &arg[2]);
     struct ofpact_aggrs *aggrs;
     aggrs =  ofpact_put_AGGRS(pp->ofpacts);
-    error = str_to_u16(&arg[0], "port_for_aggr", &port); //
-    error2 = str_to_u16(&arg[2], "flowid", &fl_id); //error2 =
+    error = str_to_u16(&arg[0], "port_for_aggr", &port);
+    error2 = str_to_u16(&arg[2], "flowid", &fl_id);
     aggrs->port = port;
     aggrs->flowid = fl_id;
     arg[2] = '\0';
     if(error2)
     {
-        VLOG_ERR(" "); //does aboslutely nothing just removes stupid prints
+        VLOG_ERR(" "); //removes useless prints
     }
 
-    //VLOG_ERR("error2: %s", error2);
     return error;
 
 }
@@ -7907,11 +7903,10 @@ decode_OFPAT_RAW_SPLIT(uint16_t port, enum ofp_version ofp_version OVS_UNUSED,
 static char * OVS_WARN_UNUSED_RESULT
 parse_SPLIT(char *arg, const struct ofpact_parse_params *pp) //
 {
-    //uint16_t port;
+
     printf("some split parsing stuff %s\n", arg);
-    //ofpact_put_SPLIT(pp->ofpacts);
     return str_to_u16(arg,"port for split", &ofpact_put_SPLIT(pp->ofpacts)->port);
-    //return NULL;
+
 
 }
 static void

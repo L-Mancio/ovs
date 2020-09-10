@@ -31,6 +31,7 @@ struct ofp_aggrs_output {
 };
 OFP_ASSERT(sizeof(struct ofp_aggrs_output) == 8);
 */
+ntohl(get_16aligned_be32(&iph->ip_dst))
 static void
 encode_AGGRS(const struct ofpact_aggrs *aggrs,
              enum ofp_version ofp_version OVS_UNUSED,
@@ -126,3 +127,38 @@ check_AGGRS(const struct ofpact_aggrs *aggrs OVS_UNUSED,
     //return ofpact_check_output_port(aggrs->port, cp->max_ports);
     return 0;
 }
+
+//fake ack is equal to orioginal ack + size of payload
+//ovs_16aligned_u32 *f_ack;
+//put_16aligned_u32(f_ack, sizepayload);
+
+//get_unaligned_u16(tcpHeadercopy->tcp_ack.hi)
+//VLOG_ERR("tcpHeadercopy->tcp_ack %d"PRIu16, htons(tcpHeadercopy->tcp_ack.hi) );
+//get_16aligned_u32
+//ovs_be32 t_ack = get_16aligned_be32(&tcpHeadercopy->tcp_ack);
+
+struct ds ds = DS_EMPTY_INITIALIZER;
+
+
+
+int maxport = getmaxport(ctx->xin->ofproto);
+int randport = 0;
+if (maxport < 2)
+{
+    randport = 1;
+}
+if(maxport == 2 || maxport == 4 || maxport == 7)
+{
+    VLOG_ERR("PORT SHENANIGANS");
+    randport = 2; //for testing purposes turn to 1 else 2
+}
+else if (maxport > 2)
+{
+    unsigned int seed = 0;
+    int low = 3;
+    int high = maxport;
+    randport = (rand_r(&seed) % (high - low + 1)) + low;
+
+}
+
+ofp_port_t out_port = (randport > 0 && randport != (int) ctx->xin->flow.in_port.ofp_port) ? randport : maxport;
