@@ -5267,17 +5267,20 @@ xlate_output_action(struct xlate_ctx *ctx, ofp_port_t port,
         ctx->nf_output_iface = NF_OUT_MULTI;
     }
 }
-#define PACKET_BUFF_ELEMENTS 7 //each dp_packet buffer contains this amount of packets, just modify this all should work fine
+#define PACKET_BUFF_ELEMENTS 3 //each dp_packet buffer contains this amount of packets, just modify this all should work fine
 #define FLOWS_TO_HOLD 1000 //pseudo-dictionary for aggregation, since we need flow_id to distinguish which flow we're working on , honestly 1000 flows is overkill
-#define TIMER_THREAD 2000 //amount of milliseconds we want the timer for each thread, started after first flow for aggregation is received, to last (e.g 8 seconds-->8000)
-#define TIMER_THREAD_TCP 2000
+#define TIMER_THREAD 250 //amount of milliseconds we want the timer for each thread, started after first flow for aggregation is received, to last (e.g 8 seconds-->8000)
+#define TIMER_THREAD_TCP 250
 static int index_for_dict = 0; //this value is used to iterate over our pseudo dictionary
 static int flows_in_dict = 0; //this value is used to check how many flow_ids are stored at a given time
 
 static int index_for_dict_tcp = 0; //this value is used to iterate over our pseudo dictionary
 static int flows_in_dict_tcp = 0; //this value is used to check how many flow_ids are stored at a given time
 
-
+//stats
+static FILE *logfile;
+static int udp_log_count = 0;
+static int tcp_log_count = 0;
 /*
     my packet structure which keeps track of the actual packet size @sizeofpayload for optimal payload printing
     and the packet itself @packet
@@ -5491,6 +5494,17 @@ static void
 
     if(args->dict_entry->dp_packet_buff1[0].packet != 0 || args->dict_entry->dp_packet_buff1[0].packet != NULL) //overkill but needed
     {
+        /*
+         * if only one packet was aggregated, log to file as non-aggregatable
+         * remove code below so that no log file is created
+        */
+        if(args->dict_entry->dp_packet_buff1[1].packet == 0)
+        {
+            udp_log_count++;
+            logfile = fopen("/root/ovs/Aggregationstats.txt", "a+");
+            fprintf(logfile, "aggregated only 1 udp packet! total times udp didn't aggregate or aggregated only one packet: %d \n", udp_log_count);
+            fclose(logfile);
+        }
         args->dict_entry->index = 0;
         struct eth_addr fake_mac = ETH_ADDR_C(12, 34, 56, 78, 9a, bc); //fake mac to distinguish Packet Aggregate
         //do stuff as if buffer were full
@@ -5528,6 +5542,10 @@ static void
     }
     else
     {
+        udp_log_count++;
+        logfile = fopen("/root/ovs/Aggregationstats.txt", "a+");
+        fprintf(logfile, "aggregated 0 udp packet! total times udp didn't aggregate or aggregated only one packet: %d \n", udp_log_count);
+        fclose(logfile);
         VLOG_ERR("udp timer stopped nothing sent buffer was empty");
     }
     return 0;
@@ -5545,6 +5563,17 @@ static void
 
     if(args->dict_entry->dp_packet_buff1[0].packet != 0 || args->dict_entry->dp_packet_buff1[0].packet != NULL)
     {
+        /*
+         * if only one packet was aggregated, log to file as non-aggregatable
+         * remove code below so that no log file is created
+        */
+        if(args->dict_entry->dp_packet_buff1[1].packet == 0)
+        {
+            tcp_log_count++;
+            logfile = fopen("/root/ovs/Aggregationstats.txt", "a+");
+            fprintf(logfile, "aggregated only 1 tcp packet! total times TCP didn't aggregate or aggregated only one packet: %d \n", tcp_log_count);
+            fclose(logfile);
+        }
         args->dict_entry->index = 0;
         struct eth_addr fake_mac = ETH_ADDR_C(12,34,56,78,9a,bc); //fake mac to distinguish Packet Aggregate
         //do stuff as if buffer were full
@@ -5580,6 +5609,10 @@ static void
     }
     else
     {
+        tcp_log_count++;
+        logfile = fopen("/root/ovs/Aggregationstats.txt", "a+");
+        fprintf(logfile, "aggregated only 1 tcp packet! total times TCP didn't aggregate or aggregated only one packet: %d \n", tcp_log_count);
+        fclose(logfile);
         VLOG_ERR("tcp timer stopped nothing sent buffer was empty");
     }
 
