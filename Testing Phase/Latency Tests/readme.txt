@@ -18,6 +18,8 @@ if this number is changed remember to make, make install and rerun gdb, mininet 
 NOTE: it also might occurr when aggregation flows install that packets keep coming even after the program execution has terminated. best way i found to avoid
 this issue for now was to restart gdb waiting for the requests to complete. This is especially weird considering i kill the curl processes when the timer
 in latry.py expires.
+NOTE: if the gdb process ever breaks, go to the /root/ovs directory and run "sh restartDB2.sh" then refollow instructions above starting at 4.
+
 NOTE: To significantly improve this experiment I recommend finding a way to run one ovs instance for each switch, and modifying the aggregation action to
 remove the use of the dictionary. This problematic is also addressed in the thesis and should be the first thing to consider in a continuation of this
 reaserch project.
